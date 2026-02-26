@@ -6,13 +6,17 @@
 \citation{gisin2002quantum,shor2000simple}
 \citation{scarani2009security}
 \citation{etsi2023qkd}
+\citation{etsi2023qkd}
 \citation{shor1997polynomial}
 \citation{mosca2018cybersecurity}
 \citation{nsa2022quantum}
-\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{2}{section.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {1.1}Quantum Key Distribution and Classical Authentication}{2}{subsection.1.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {1.2}The Post-Quantum Authentication Gap}{2}{subsection.1.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {1.3}Contributions}{2}{subsection.1.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{4}{section.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.1}Quantum Key Distribution and Classical Authentication}{4}{subsection.1.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.2}The ETSI QKD 014 Control Channel}{4}{subsection.1.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.3}The Post-Quantum Authentication Gap}{4}{subsection.1.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.4}Affected Infrastructure}{5}{subsection.1.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.5}Contributions}{5}{subsection.1.5}\protected@file@percent }
+\citation{paraxiom2026lean4}
 \citation{nist2024pqc}
 \citation{stebila2023hybrid}
 \citation{stebila2016postquantum}
@@ -20,49 +24,54 @@
 \citation{xu2020secure}
 \citation{makarov2016creation}
 \citation{scarani2009security}
-\@writefile{toc}{\contentsline {subsection}{\numberline {1.4}Related Work}{3}{subsection.1.4}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {2}Preliminaries}{3}{section.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Quantum Key Distribution Model}{3}{subsection.2.1}\protected@file@percent }
 \citation{shor2000simple}
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.6}Related Work}{6}{subsection.1.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2}Preliminaries}{6}{section.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Quantum Key Distribution Model}{6}{subsection.2.1}\protected@file@percent }
 \citation{mehic2020quantum,etsi2023qkd}
 \citation{shor1997polynomial}
 \citation{roetteler2017quantum}
 \citation{nist2024pqc}
 \citation{pornin2020falcon}
 \citation{nist2024pqc}
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}Classical Authentication via TLS}{4}{subsection.2.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}Quantum Cryptanalysis}{4}{subsection.2.3}\protected@file@percent }
-\newlabel{thm:shor}{{1}{4}{Shor's Algorithm~\cite {shor1997polynomial}}{theorem.1}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.4}Post-Quantum Primitives}{4}{subsection.2.4}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {3}System Model and Threat Analysis}{5}{section.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}System Architecture}{5}{subsection.3.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Adversary Model}{5}{subsection.3.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Threat Scenarios}{5}{subsection.3.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {4}Main Security Result}{5}{section.4}\protected@file@percent }
-\newlabel{thm:main}{{2}{5}{Authentication Collapse under Quantum Adversary}{theorem.2}{}}
-\@writefile{toc}{\contentsline {section}{\numberline {5}Post-Quantum Transport Gateway Protocol}{6}{section.5}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}Design Overview}{6}{subsection.5.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}Cryptographic Protocols}{6}{subsection.5.2}\protected@file@percent }
-\@writefile{loa}{\contentsline {algorithm}{\numberline {1}{\ignorespaces PQTG Handshake}}{6}{algorithm.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {5.3}Protocol Specification}{7}{subsection.5.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {6}Security Analysis}{7}{section.6}\protected@file@percent }
-\newlabel{thm:pqtg-kem}{{4}{7}{PQTG IND-CCA2 Security}{theorem.4}{}}
-\@writefile{toc}{\contentsline {section}{\numberline {7}Implementation and Performance}{7}{section.7}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {7.1}Implementation}{7}{subsection.7.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {7.2}Performance Evaluation}{8}{subsection.7.2}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Performance: Classical vs. Post-Quantum}}{8}{table.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {7.3}Deployment}{8}{subsection.7.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {8}Discussion}{8}{section.8}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {8.1}Practical Considerations}{8}{subsection.8.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {8.2}Limitations}{8}{subsection.8.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}Classical Authentication via TLS}{7}{subsection.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}Quantum Cryptanalysis}{7}{subsection.2.3}\protected@file@percent }
+\newlabel{thm:shor}{{1}{7}{Shor's Algorithm~\cite {shor1997polynomial}}{theorem.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4}Post-Quantum Primitives}{7}{subsection.2.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3}System Model and Threat Analysis}{7}{section.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}System Architecture}{7}{subsection.3.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Adversary Model}{8}{subsection.3.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Threat Scenarios}{8}{subsection.3.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4}Main Security Result}{9}{section.4}\protected@file@percent }
+\newlabel{thm:main}{{2}{9}{Authentication Collapse under Quantum Adversary}{theorem.2}{}}
+\newlabel{cor:main}{{3}{9}{}{theorem.3}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {5}Post-Quantum Transport Gateway Protocol}{9}{section.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}Design Overview}{9}{subsection.5.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}Cryptographic Protocols}{10}{subsection.5.2}\protected@file@percent }
+\@writefile{loa}{\contentsline {algorithm}{\numberline {1}{\ignorespaces PQTG Handshake}}{10}{algorithm.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.3}Protocol Specification}{10}{subsection.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6}Security Analysis}{10}{section.6}\protected@file@percent }
+\newlabel{thm:pqtg-kem}{{4}{10}{PQTG IND-CCA2 Security}{theorem.4}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {7}Implementation and Performance}{11}{section.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.1}Implementation}{11}{subsection.7.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.2}Performance Evaluation}{11}{subsection.7.2}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Performance: Classical vs. Post-Quantum}}{11}{table.1}\protected@file@percent }
+\citation{paraxiom2026lean4}
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.3}Deployment}{12}{subsection.7.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.4}Formal Verification}{12}{subsection.7.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {8}Discussion}{12}{section.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {8.1}Why Hybrid TLS Is Insufficient}{12}{subsection.8.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {8.2}No Alternative Solutions Exist}{12}{subsection.8.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {8.3}Practical Considerations}{13}{subsection.8.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {8.4}Limitations}{13}{subsection.8.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {9}Conclusion}{13}{section.9}\protected@file@percent }
 \bibstyle{plain}
 \bibcite{bennett1984quantum}{1}
 \bibcite{ekert1991quantum}{2}
 \bibcite{gisin2002quantum}{3}
 \bibcite{shor2000simple}{4}
+\@writefile{toc}{\contentsline {subsection}{\numberline {9.1}Future Work}{14}{subsection.9.1}\protected@file@percent }
 \bibcite{scarani2009security}{5}
-\@writefile{toc}{\contentsline {section}{\numberline {9}Conclusion}{9}{section.9}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {9.1}Future Work}{9}{subsection.9.1}\protected@file@percent }
 \bibcite{etsi2023qkd}{6}
 \bibcite{shor1997polynomial}{7}
 \bibcite{mosca2018cybersecurity}{8}
@@ -76,6 +85,8 @@
 \bibcite{pornin2020falcon}{16}
 \bibcite{roetteler2017quantum}{17}
 \bibcite{mehic2020quantum}{18}
-\@writefile{toc}{\contentsline {section}{\numberline {A}Deployment Guide}{11}{appendix.A}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {B}Security Parameters}{11}{appendix.B}\protected@file@percent }
-\gdef \@abspage@last{11}
+\bibcite{paraxiom2026lean4}{19}
+\bibcite{empireclub2026}{20}
+\@writefile{toc}{\contentsline {section}{\numberline {A}Deployment Guide}{16}{appendix.A}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {B}Security Parameters}{17}{appendix.B}\protected@file@percent }
+\gdef \@abspage@last{17}

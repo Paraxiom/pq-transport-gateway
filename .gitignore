@@ -22,6 +22,10 @@ authorized_keys
 *.swp
 *.swo
 
+# Lean 4
+lean/.lake/
+lean/lake-manifest.json
+
 # OS
 .DS_Store
 Thumbs.db

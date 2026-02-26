@@ -48,7 +48,7 @@ We prove (Theorem~\ref{thm:main}) that \textbf{any production QKD deployment usi
 
 As a constructive solution, we present the Post-Quantum Transport Gateway (PQTG), a transparent security layer that replaces classical TLS authentication with NIST-standardized post-quantum primitives (ML-KEM-768, Falcon-512, SPHINCS+-256f) while maintaining backward compatibility with existing QKD infrastructure. PQTG requires no vendor firmware modifications---it deploys as a localhost gateway on existing QKD hardware.
 
-We provide formal security analysis under the quantum random oracle model, prove IND-CCA2 security for key exchange and EUF-CMA security for authentication, and demonstrate practical deployment through an open-source Rust implementation with performance benchmarks showing post-quantum operations outperform RSA-2048 by up to 125$\times$. Critical components are formally verified with 549 machine-checked theorems in Lean~4.
+We provide formal security analysis under the quantum random oracle model, prove IND-CCA2 security for key exchange and EUF-CMA security for authentication, and demonstrate practical deployment through an open-source Rust implementation with performance benchmarks showing post-quantum operations outperform RSA-2048 by up to 125$\times$. Critical components are formally verified with 649 machine-checked theorems in Lean~4.
 
 \medskip
 \noindent\textbf{Keywords:} Quantum Key Distribution, Post-Quantum Cryptography, ETSI QKD 014, authenticated channels, Shor's algorithm, ML-KEM, Falcon, SPHINCS+, harvest-now-decrypt-later
@@ -134,7 +134,7 @@ This paper makes the following contributions:
 
     \item \textbf{Implementation and evaluation}: We provide an open-source implementation and demonstrate that post-quantum operations achieve lower latency than RSA-based handshakes.
 
-    \item \textbf{Formal verification}: Critical security properties are verified with 549 machine-checked theorems in Lean~4~\cite{paraxiom2026lean4}, with zero unresolved assumptions.
+    \item \textbf{Formal verification}: Critical security properties are verified with 649 machine-checked theorems in Lean~4~\cite{paraxiom2026lean4}, with zero unresolved assumptions.
 \end{enumerate}
 
 \subsection{Related Work}
@@ -352,7 +352,7 @@ PQTG supports major QKD vendors: ID Quantique (Cerberis XG), Toshiba QKD System,
 
 \subsection{Formal Verification}
 
-Critical security properties of the Paraxiom cryptographic stack---including Falcon-512 parameter correctness, SPHINCS+ security bounds, ML-KEM field arithmetic, and transport frame integrity---are formally verified with 549 machine-checked theorems in Lean~4~\cite{paraxiom2026lean4} using Mathlib v4.27.0, with \textbf{zero unresolved assumptions} (\texttt{sorry}-free).
+Critical security properties of the Paraxiom cryptographic stack---including Falcon-512 parameter correctness, SPHINCS+ security bounds, ML-KEM field arithmetic, and transport frame integrity---are formally verified with 649 machine-checked theorems in Lean~4~\cite{paraxiom2026lean4} using Mathlib v4.27.0, with \textbf{zero unresolved assumptions} (\texttt{sorry}-free).
 
 \section{Discussion}
 
@@ -514,7 +514,7 @@ M. Mehic et al.,
 
 \bibitem{paraxiom2026lean4}
 S. Cormier,
-``549 Lean 4 Theorems: Formal Verification Across Seven Post-Quantum Systems,''
+``649 Lean 4 Theorems: Formal Verification Across Eight Post-Quantum Systems,''
 \textit{Zenodo}, DOI: 10.5281/zenodo.14805498, 2026.
 
 \bibitem{empireclub2026}

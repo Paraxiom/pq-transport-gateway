@@ -1,0 +1,49 @@
+digraph DeploymentArchitecture {
+    rankdir=TB;
+    compound=true;
+    node [shape=box, style="rounded,filled", fontname="Arial"];
+    edge [fontname="Arial"];
+    
+    // Title
+    labelloc="t";
+    label="PQTG Deployment Architecture";
+    fontsize=16;
+    fontname="Arial Bold";
+    
+    // QKD Machine Box
+    subgraph cluster_qkd_machine {
+        label="QKD Hardware Machine";
+        style="filled,rounded";
+        fillcolor="#f0f0f0";
+        fontname="Arial Bold";
+        
+        // Components inside QKD machine
+        pqtg [label="PQTG\nPort 8443", fillcolor="#6666ff", fontcolor="white", style="rounded,filled,bold"];
+        qkd_api [label="QKD Vendor API\nPort 443\n(localhost only)", fillcolor="#ffcccc"];
+        
+        // Internal connection
+        pqtg -> qkd_api [label="127.0.0.1:443\nClassical TLS", style="dashed"];
+    }
+    
+    // External clients
+    qssh1 [label="QSSH Client 1", fillcolor="#ccffcc"];
+    qssh2 [label="QSSH Client 2", fillcolor="#ccffcc"];
+    qssh3 [label="QSSH Client N", fillcolor="#ccffcc"];
+    
+    // Firewall
+    firewall [label="Firewall\n✓ Port 8443 (PQTG)\n✗ Port 443 (Blocked)", shape=trapezium, fillcolor="#ffff99"];
+    
+    // Connections
+    qssh1 -> firewall [label="Post-Quantum"];
+    qssh2 -> firewall [label="Falcon/SPHINCS+"];
+    qssh3 -> firewall [label="Secure"];
+    
+    firewall -> pqtg [label="Only PQTG\naccessible", color="green", style="bold"];
+    
+    // Notes
+    note1 [label="External access ONLY\nthrough PQTG", shape=note, fillcolor="#ccffff"];
+    note2 [label="Vendor API never\nexposed externally", shape=note, fillcolor="#ffcccc"];
+    
+    firewall -> note1 [style="dotted", arrowhead="none"];
+    qkd_api -> note2 [style="dotted", arrowhead="none"];
+}

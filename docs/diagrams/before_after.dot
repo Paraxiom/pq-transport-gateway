@@ -1,0 +1,55 @@
+digraph BeforeAfter {
+    rankdir=TB;
+    compound=true;
+    node [shape=box, style="rounded,filled", fontname="Arial"];
+    edge [fontname="Arial"];
+    
+    // Title
+    labelloc="t";
+    label="Before vs After PQTG";
+    fontsize=18;
+    fontname="Arial Bold";
+    
+    // Before section
+    subgraph cluster_before {
+        label="BEFORE: Vulnerable to Quantum Attack";
+        style="filled,rounded";
+        fillcolor="#ffeeee";
+        fontname="Arial Bold";
+        fontcolor="red";
+        
+        b_client [label="Client", fillcolor="#ffcccc"];
+        b_qkd [label="QKD Device", fillcolor="#ffcccc"];
+        b_attacker [label="Quantum\nAttacker", fillcolor="#ff0000", fontcolor="white"];
+        
+        b_client -> b_qkd [label="RSA/ECDSA", color="red", style="bold"];
+        b_attacker -> b_qkd [label="BREAKS IT!", color="red", style="bold,dashed"];
+        
+        b_result [label="❌ Keys Stolen\n❌ System Compromised\n❌ QKD Useless", shape=note, fillcolor="#ff9999"];
+    }
+    
+    // After section  
+    subgraph cluster_after {
+        label="AFTER: Quantum-Safe with PQTG";
+        style="filled,rounded";
+        fillcolor="#eeffee";
+        fontname="Arial Bold";
+        fontcolor="green";
+        
+        a_client [label="Client", fillcolor="#ccffcc"];
+        a_pqtg [label="PQTG", fillcolor="#6666ff", fontcolor="white", style="rounded,filled,bold"];
+        a_qkd [label="QKD Device", fillcolor="#ccffcc"];
+        a_attacker [label="Quantum\nAttacker", fillcolor="#ff9999"];
+        
+        a_client -> a_pqtg [label="Falcon/SPHINCS+", color="green", style="bold", penwidth=2];
+        a_pqtg -> a_qkd [label="localhost", color="blue", style="dashed"];
+        a_attacker -> a_pqtg [label="CANNOT\nBREAK", color="gray", style="dashed"];
+        
+        a_result [label="✅ Keys Protected\n✅ System Secure\n✅ QKD Works", shape=note, fillcolor="#99ff99"];
+    }
+    
+    // Arrow showing progression
+    migrate [label="Deploy\nPQTG", shape=ellipse, fillcolor="#ffffcc", style="filled,bold"];
+    cluster_before -> migrate [ltail=cluster_before];
+    migrate -> cluster_after [lhead=cluster_after];
+}

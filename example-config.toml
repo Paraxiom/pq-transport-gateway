@@ -1,0 +1,76 @@
+# Example configuration for PQ-QKD-Proxy
+
+[proxy]
+# Address to listen on for post-quantum secure connections
+# Use specific interface IP, not 0.0.0.0 for security
+listen = "192.168.1.100:8443"
+
+# Maximum concurrent connections
+max_connections = 100
+
+# Connection timeout in seconds
+connection_timeout = 30
+
+# Allowed source IP ranges (CIDR notation)
+# Empty means allow all
+allowed_sources = [
+    "192.168.1.0/24",
+    "10.0.0.0/8"
+]
+
+[qkd]
+# Vendor QKD API endpoint - MUST be localhost for security
+vendor_api = "https://localhost:443"
+
+# Path to vendor's TLS certificate (optional)
+# vendor_cert = "/etc/qkd/vendor-cert.pem"
+
+# Vendor API key (if required)
+# vendor_api_key = "secret-api-key"
+
+# ETSI QKD API version
+api_version = "1.0"
+
+# Timeout for key requests in seconds
+key_timeout = 5
+
+# Maximum key size in bytes
+max_key_size = 1048576  # 1MB
+
+[security]
+# Post-quantum algorithm
+pq_algorithm = "falcon512"
+
+# Signature algorithm
+sig_algorithm = "sphincsplus"
+
+# Path to authorized client public keys
+authorized_keys = "/etc/pq-qkd-proxy/authorized_keys"
+
+# Path to proxy's private key
+proxy_private_key = "/etc/pq-qkd-proxy/proxy.key"
+
+# Path to proxy's certificate
+proxy_certificate = "/etc/pq-qkd-proxy/proxy.crt"
+
+# Enable audit logging
+audit_enabled = true
+
+# Audit log path
+audit_log = "/var/log/pq-qkd-proxy/audit.log"
+
+# Key rotation interval in hours
+key_rotation_hours = 24
+
+[performance]
+# Worker threads (0 = number of CPU cores)
+worker_threads = 0
+
+# Request queue size
+queue_size = 1000
+
+# Enable caching of QKD keys
+cache_enabled = false
+
+# Cache TTL in seconds
+cache_ttl = 300

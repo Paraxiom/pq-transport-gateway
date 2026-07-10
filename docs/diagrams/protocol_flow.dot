@@ -1,0 +1,45 @@
+digraph ProtocolFlow {
+    rankdir=TB;
+    node [shape=box, style="rounded,filled", fontname="Arial"];
+    edge [fontname="Arial"];
+    
+    // Title
+    labelloc="t";
+    label="PQTG Protocol Flow: How It Works";
+    fontsize=16;
+    fontname="Arial Bold";
+    
+    // Participants
+    subgraph cluster_participants {
+        style=invis;
+        client [label="QSSH Client", fillcolor="#ccffcc", pos="0,0!"];
+        pqtg [label="PQTG", fillcolor="#6666ff", fontcolor="white", pos="2,0!"];
+        qkd [label="QKD Device API", fillcolor="#ffcccc", pos="4,0!"];
+    }
+    
+    // Steps with proper ordering
+    start [label="1. Client initiates connection", shape=ellipse, fillcolor="#ffffcc"];
+    auth [label="2. Falcon-512 handshake\n+ SPHINCS+ signatures", fillcolor="#ccffff"];
+    verify [label="3. PQTG verifies client\n(authorized_keys check)", fillcolor="#ccffff"];
+    translate [label="4. PQTG translates request\nto ETSI QKD API format", fillcolor="#ffccff"];
+    forward [label="5. Forward to vendor API\n(localhost, classical TLS)", fillcolor="#ffccff"];
+    retrieve [label="6. Get quantum keys\nfrom QKD device", fillcolor="#ffffcc"];
+    encrypt [label="7. Encrypt response with\npost-quantum crypto", fillcolor="#ccffff"];
+    send [label="8. Send secure response\nto client", fillcolor="#ccffcc"];
+    
+    // Flow
+    start -> auth;
+    auth -> verify;
+    verify -> translate;
+    translate -> forward;
+    forward -> retrieve;
+    retrieve -> encrypt;
+    encrypt -> send;
+    
+    // Annotations
+    secure1 [label="Quantum-Safe\nZone", shape=plaintext, fontcolor="green", fontsize=12];
+    secure2 [label="Classical\n(Hidden)", shape=plaintext, fontcolor="blue", fontsize=12];
+    
+    auth -> secure1 [style="dotted", arrowhead="none", color="green"];
+    forward -> secure2 [style="dotted", arrowhead="none", color="blue"];
+}

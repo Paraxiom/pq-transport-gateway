@@ -1,0 +1,35 @@
+digraph PQTGSolution {
+    rankdir=LR;
+    node [shape=box, style="rounded,filled", fontname="Arial"];
+    edge [fontname="Arial"];
+    
+    // Title
+    labelloc="t";
+    label="PQTG SOLUTION: Quantum-Safe Protection for QKD Infrastructure";
+    fontsize=16;
+    fontname="Arial Bold";
+    
+    // Nodes
+    client [label="QSSH Client", fillcolor="#ccffcc"];
+    internet [label="Internet/Network", shape=ellipse, fillcolor="#ffffcc"];
+    pqtg [label="PQTG\n(Post-Quantum\nTransport Gateway)", fillcolor="#6666ff", fontcolor="white", style="rounded,filled,bold"];
+    qkd [label="QKD Device\n(Toshiba/IDQ)", fillcolor="#ccffcc"];
+    attacker [label="Quantum\nAttacker", fillcolor="#ff6666", fontcolor="white"];
+    
+    // Main flow
+    client -> internet [label="Falcon-512 +\nSPHINCS+", color="green", style="bold", penwidth=2];
+    internet -> pqtg [label="Post-Quantum\nSecure", color="green", style="bold", penwidth=2];
+    pqtg -> qkd [label="Classical TLS\n(localhost only)", color="blue", style="dashed"];
+    
+    // Attack blocked
+    attacker -> internet [label="CANNOT break\nPQ crypto", style="dashed", color="gray"];
+    
+    // Success box
+    success [label="✓ PROTECTED ✓\n• Quantum-resistant auth\n• Secure key retrieval\n• No vendor changes needed", 
+             shape=note, fillcolor="#99ff99", fontcolor="black"];
+    pqtg -> success [style="dotted", arrowhead="none"];
+    
+    // PQTG location note
+    location [label="Runs on same\nmachine as QKD", shape=plaintext, fontsize=10];
+    location -> pqtg [style="dotted", arrowhead="none"];
+}

@@ -1,0 +1,31 @@
+# Rust
+target/
+Cargo.lock
+**/*.rs.bk
+
+# Config
+config.toml
+!example-config.toml
+
+# Keys and certificates
+*.key
+*.crt
+*.pem
+authorized_keys
+
+# Logs
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Lean 4
+lean/.lake/
+lean/lake-manifest.json
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,348 @@
+//! Main proxy server implementation.
+//!
+//! Wire protocol (v2, KEM-based):
+//!   ClientHello { version, client_random, kem_ek, falcon_vk, slh_dsa_vk, requested_key_size }
+//!   ServerHello { version, server_random, falcon_vk, slh_dsa_vk, kem_ciphertext, transcript_sig }
+//!
+//! Both sides derive `transcript = SHA3(client_random ‖ server_random ‖ kem_ek
+//! ‖ server_falcon_vk ‖ kem_ciphertext)` and `session_key = SHA3("pqtg-session-v2"
+//! ‖ kem_ss ‖ transcript)`. If the optional QKD key is available, the PQC
+//! session key is mixed with it via `mix_keys`.
+
+use crate::{
+    audit,
+    auth::Authenticator,
+    config::Config,
+    crypto::{
+        derive_session_key, encapsulate_to, mix_keys, random_bytes, transcript_hash, PqKeyExchange,
+        PqSession, FALCON_512_VK_LEN, MIN_SESSION_FRAME_BYTES, ML_KEM_768_EK_LEN,
+        SLH_DSA_SHAKE128F_VK_LEN,
+    },
+    qkd_client::QkdClient,
+};
+use anyhow::{anyhow, Context, Result};
+use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tracing::{debug, error, info, warn};
+
+#[derive(Clone)]
+pub struct ProxyServer {
+    config: Arc<Config>,
+    qkd_client: Arc<QkdClient>,
+    authenticator: Arc<Authenticator>,
+    host_key: Arc<PqKeyExchange>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ClientHello {
+    pub version: String,
+    pub client_random: [u8; 32],
+    /// ML-KEM-768 encapsulation key.
+    pub kem_ek: Vec<u8>,
+    /// Falcon-512 verification key (client identity, used for inner-channel signatures).
+    pub falcon_vk: Vec<u8>,
+    /// SLH-DSA-Shake128f verification key (audit-grade hash-based identity).
+    pub slh_dsa_vk: Vec<u8>,
+    pub requested_key_size: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ServerHello {
+    pub version: String,
+    pub server_random: [u8; 32],
+    pub falcon_vk: Vec<u8>,
+    pub slh_dsa_vk: Vec<u8>,
+    /// ML-KEM-768 ciphertext (server's encapsulation against client's EK).
+    pub kem_ciphertext: Vec<u8>,
+    /// Falcon-512 signature over the transcript hash.
+    pub transcript_sig: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct KeyRequest {
+    pub key_id: String,
+    pub size: usize,
+    pub purpose: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct KeyResponse {
+    pub key_id: String,
+    pub key_data: Vec<u8>,
+    pub metadata: KeyMetadata,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct KeyMetadata {
+    pub algorithm: String,
+    pub created_at: i64,
+    pub expires_at: Option<i64>,
+    pub qkd_enhanced: bool,
+}
+
+const PROTOCOL_VERSION: &str = "2.0";
+const MAX_HELLO_BYTES: usize = 16 * 1024;
+const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+
+impl ProxyServer {
+    pub async fn new(config: Arc<Config>) -> Result<Self> {
+        let qkd_client = QkdClient::new(&config)?;
+        let host_key = Self::load_or_generate_identity(&config.security.proxy_private_key)?;
+        let authenticator = Authenticator::new(&config)?;
+        Ok(Self {
+            config,
+            qkd_client: Arc::new(qkd_client),
+            authenticator: Arc::new(authenticator),
+            host_key: Arc::new(host_key),
+        })
+    }
+
+    /// Load the persisted identity file if present; otherwise generate a
+    /// fresh ephemeral identity and warn loudly. Production deployments
+    /// MUST run `--generate-keys` once to create a stable identity, since
+    /// regenerating on every start invalidates client-side vk pinning
+    /// (issue #2).
+    fn load_or_generate_identity(path: &str) -> Result<PqKeyExchange> {
+        match PqKeyExchange::load_if_present(path)? {
+            Some(identity) => {
+                info!("Loaded persisted PQTG identity from {}", path);
+                Ok(identity)
+            }
+            None => {
+                warn!(
+                    "No persisted identity at {}; generating ephemeral identity. \
+                     This is acceptable for development but MUST NOT be used \
+                     in production — restart-stable identity is required for \
+                     client vk pinning. Run `--generate-keys` to fix.",
+                    path
+                );
+                PqKeyExchange::new()
+            }
+        }
+    }
+
+    pub async fn check_vendor_api(&self) -> Result<()> {
+        info!("Checking vendor QKD API connectivity...");
+        match self.qkd_client.check_connectivity().await {
+            Ok(()) => {
+                info!("Successfully connected to vendor QKD API");
+                Ok(())
+            }
+            Err(e) => {
+                error!("Failed to connect to vendor QKD API: {}", e);
+                Err(e)
+            }
+        }
+    }
+
+    pub async fn handle_connection(
+        &self,
+        mut stream: TcpStream,
+        peer_addr: SocketAddr,
+    ) -> Result<()> {
+        audit::log_connection(&peer_addr);
+        let timeout = tokio::time::Duration::from_secs(self.config.proxy.connection_timeout);
+        let (session, client_falcon_vk) =
+            tokio::time::timeout(timeout, self.perform_handshake(&mut stream, &peer_addr))
+                .await
+                .context("Handshake timeout")?
+                .context("Handshake failed")?;
+        info!("Established PQ session with {}", peer_addr);
+        let _ = client_falcon_vk; // currently unused; reserved for inner auth
+        self.handle_session(stream, session, peer_addr).await
+    }
+
+    async fn perform_handshake(
+        &self,
+        stream: &mut TcpStream,
+        peer_addr: &SocketAddr,
+    ) -> Result<(PqSession, Vec<u8>)> {
+        // ── ClientHello ─────────────────────────────────────────────────────
+        let client_hello: ClientHello = read_framed(stream, MAX_HELLO_BYTES).await?;
+        if !client_hello.version.starts_with("2.") {
+            return Err(anyhow!(
+                "Unsupported protocol version: {}",
+                client_hello.version
+            ));
+        }
+
+        // ── Validate ClientHello field lengths (issue #5) ───────────────────
+        if client_hello.kem_ek.len() != ML_KEM_768_EK_LEN {
+            return Err(anyhow!(
+                "ClientHello.kem_ek wrong size: expected {} bytes, got {}",
+                ML_KEM_768_EK_LEN,
+                client_hello.kem_ek.len()
+            ));
+        }
+        if client_hello.falcon_vk.len() != FALCON_512_VK_LEN {
+            return Err(anyhow!(
+                "ClientHello.falcon_vk wrong size: expected {} bytes, got {}",
+                FALCON_512_VK_LEN,
+                client_hello.falcon_vk.len()
+            ));
+        }
+        if client_hello.slh_dsa_vk.len() != SLH_DSA_SHAKE128F_VK_LEN {
+            return Err(anyhow!(
+                "ClientHello.slh_dsa_vk wrong size: expected {} bytes, got {}",
+                SLH_DSA_SHAKE128F_VK_LEN,
+                client_hello.slh_dsa_vk.len()
+            ));
+        }
+
+        // ── Authorize the client (issue #1) ─────────────────────────────────
+        // Falcon-512 vk + SLH-DSA-Shake128f vk pair must appear in
+        // `authorized_keys`. Empty file ⇒ no one is authorized
+        // (fail-closed). Done before any keypair generation / encapsulation
+        // so an unauthorized peer doesn't get to exhaust crypto budget.
+        match self
+            .authenticator
+            .verify_client(&client_hello.falcon_vk, &client_hello.slh_dsa_vk)
+        {
+            Ok(auth_key) => {
+                debug!(
+                    "Client authorized: key_id={} peer={}",
+                    auth_key.key_id, peer_addr
+                );
+            }
+            Err(e) => {
+                audit::log_auth_failure(peer_addr, &e.to_string());
+                warn!("Rejected unauthorized client {}: {}", peer_addr, e);
+                return Err(anyhow!("Client not in authorized_keys"));
+            }
+        }
+
+        // ── Encapsulate against client's KEM EK ─────────────────────────────
+        let (kem_ciphertext, pqc_secret) = encapsulate_to(&client_hello.kem_ek)?;
+        let server_random = random_bytes::<32>();
+
+        // ── Build + sign transcript ─────────────────────────────────────────
+        let transcript = transcript_hash(
+            &client_hello.client_random,
+            &server_random,
+            &client_hello.kem_ek,
+            self.host_key.falcon_pk_bytes(),
+            &kem_ciphertext,
+        );
+        let transcript_sig = self.host_key.sign_transcript(&transcript)?;
+
+        let server_hello = ServerHello {
+            version: PROTOCOL_VERSION.to_string(),
+            server_random,
+            falcon_vk: self.host_key.falcon_pk_bytes().to_vec(),
+            slh_dsa_vk: self.host_key.slh_dsa_pk_bytes().to_vec(),
+            kem_ciphertext,
+            transcript_sig,
+        };
+        write_framed(stream, &server_hello).await?;
+
+        // ── Optional QKD mixing ─────────────────────────────────────────────
+        let final_secret = match self.qkd_client.get_key(32).await {
+            Ok(qkd_key) => {
+                audit::log_qkd_key_used(peer_addr, &qkd_key.key_id);
+                mix_keys(&qkd_key.key_data, &pqc_secret)
+            }
+            Err(_) => {
+                warn!("QKD not available, using PQC-only mode");
+                pqc_secret
+            }
+        };
+        let session_key = derive_session_key(&final_secret, &transcript);
+
+        let session = PqSession::new(
+            &session_key,
+            random_bytes::<32>(),
+            client_hello.falcon_vk.clone(),
+        )?;
+        Ok((session, client_hello.falcon_vk))
+    }
+
+    async fn handle_session(
+        &self,
+        mut stream: TcpStream,
+        mut session: PqSession,
+        peer_addr: SocketAddr,
+    ) -> Result<()> {
+        loop {
+            let mut len_buf = [0u8; 4];
+            match stream.read_exact(&mut len_buf).await {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    debug!("Client disconnected");
+                    break;
+                }
+                Err(e) => return Err(e.into()),
+            }
+            let len = u32::from_be_bytes(len_buf) as usize;
+            if len < MIN_SESSION_FRAME_BYTES {
+                return Err(anyhow!(
+                    "Request too small: {len} bytes (minimum {})",
+                    MIN_SESSION_FRAME_BYTES
+                ));
+            }
+            if len > MAX_REQUEST_BYTES {
+                return Err(anyhow!("Request too large: {len} bytes"));
+            }
+            let mut encrypted = vec![0u8; len];
+            stream.read_exact(&mut encrypted).await?;
+
+            let request_bytes = session.decrypt_and_verify(&encrypted)?;
+            let request: KeyRequest = bincode::deserialize(&request_bytes)?;
+            audit::log_key_request(&peer_addr, &request.key_id, request.size);
+
+            let response = self.process_key_request(request).await?;
+            let response_bytes = bincode::serialize(&response)?;
+            let encrypted_response =
+                session.sign_and_encrypt(&response_bytes, self.host_key.falcon_signing_key())?;
+
+            let len_bytes = (encrypted_response.len() as u32).to_be_bytes();
+            stream.write_all(&len_bytes).await?;
+            stream.write_all(&encrypted_response).await?;
+            stream.flush().await?;
+        }
+        Ok(())
+    }
+
+    async fn process_key_request(&self, request: KeyRequest) -> Result<KeyResponse> {
+        if request.size > self.config.qkd.max_key_size {
+            return Err(anyhow!("Requested key size exceeds maximum"));
+        }
+        let qkd_key = self.qkd_client.get_key(request.size).await?;
+        Ok(KeyResponse {
+            key_id: qkd_key.key_id.clone(),
+            key_data: qkd_key.key_data,
+            metadata: KeyMetadata {
+                algorithm: "QKD-BB84".to_string(),
+                created_at: chrono::Utc::now().timestamp(),
+                expires_at: None,
+                qkd_enhanced: true,
+            },
+        })
+    }
+}
+
+async fn read_framed<T: for<'de> Deserialize<'de>>(
+    stream: &mut TcpStream,
+    max: usize,
+) -> Result<T> {
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf).await?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > max {
+        return Err(anyhow!("Frame too large: {len} > {max}"));
+    }
+    let mut buf = vec![0u8; len];
+    stream.read_exact(&mut buf).await?;
+    Ok(bincode::deserialize(&buf)?)
+}
+
+async fn write_framed<T: Serialize>(stream: &mut TcpStream, msg: &T) -> Result<()> {
+    let bytes = bincode::serialize(msg)?;
+    let len_bytes = (bytes.len() as u32).to_be_bytes();
+    stream.write_all(&len_bytes).await?;
+    stream.write_all(&bytes).await?;
+    stream.flush().await?;
+    Ok(())
+}

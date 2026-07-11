@@ -168,6 +168,18 @@ impl ServerHandshake<HelloAccepted> {
     /// and yield the established `PqSession` plus the client's Falcon vk.
     /// Consumes `self`: this is the *only* constructor of a live session, so
     /// no data can flow before the handshake is complete.
+    ///
+    /// The handshake cannot be touched after the session is taken:
+    ///
+    /// ```compile_fail
+    /// use pq_transport_gateway::proxy::ServerHandshake;
+    /// use pq_transport_gateway::{ClientHello, PqKeyExchange};
+    /// let host = PqKeyExchange::new().unwrap();
+    /// let hello: ClientHello = unimplemented!();
+    /// let hs = ServerHandshake::new().respond(&hello, &host).unwrap();
+    /// let _session = hs.into_session(None);  // consumes the handshake
+    /// let _ = hs.server_hello();             // error[E0382]: use of moved value
+    /// ```
     pub fn into_session(self, qkd_material: Option<&[u8]>) -> Result<(PqSession, Vec<u8>)> {
         let s = self.state;
         let final_secret = match qkd_material {

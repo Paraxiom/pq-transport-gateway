@@ -85,9 +85,10 @@ async fn enc_keys_returns_single_decoded_key() {
 
     let client = make_client(&server.url(""), "sae-slave-2", "sae-master-2");
     let key = client.get_key(32).await.expect("get_key ok");
-    assert_eq!(key.key_id, "11111111-2222-3333-4444-555555555555");
-    assert_eq!(key.key_data.len(), 32);
-    assert!(key.key_data.iter().all(|&b| b == 0xAA));
+    assert_eq!(key.key_id(), "11111111-2222-3333-4444-555555555555");
+    let material = key.into_material();
+    assert_eq!(material.len(), 32);
+    assert!(material.iter().all(|&b| b == 0xAA));
     mock.assert_async().await;
 }
 
@@ -177,8 +178,9 @@ async fn dec_keys_fetch_by_id_round_trip() {
         .await
         .expect("dec_keys ok");
     assert_eq!(keys.len(), 1);
-    assert_eq!(keys[0].key_id, "uuid-A");
-    assert_eq!(keys[0].key_data.len(), 32);
+    let first = keys.into_iter().next().unwrap();
+    assert_eq!(first.key_id(), "uuid-A");
+    assert_eq!(first.into_material().len(), 32);
     mock.assert_async().await;
 }
 

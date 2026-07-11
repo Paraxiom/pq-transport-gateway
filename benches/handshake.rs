@@ -14,7 +14,7 @@
 //!   - client transcript verification (Falcon-512)
 //!   - end-to-end handshake (all stages combined)
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
 use pq_qkd_proxy::crypto::{
     derive_session_key, encapsulate_to, random_bytes, transcript_hash, EphemeralKemKey,
     PqKeyExchange,
@@ -52,13 +52,21 @@ fn bench_encapsulate(c: &mut Criterion) {
 }
 
 fn bench_decapsulate(c: &mut Criterion) {
-    let client_kem = EphemeralKemKey::new().unwrap();
-    let (ct, _ss) = encapsulate_to(&client_kem.ek_bytes).unwrap();
+    // A valid-length ciphertext. `EphemeralKemKey` is single-use (decapsulate
+    // consumes it), so each iteration gets a fresh key via `iter_batched`;
+    // keygen is the untimed setup. ML-KEM decapsulation is constant-time
+    // regardless of whether the ciphertext matches the per-iteration key.
+    let seed_kem = EphemeralKemKey::new().unwrap();
+    let (ct, _ss) = encapsulate_to(&seed_kem.ek_bytes).unwrap();
     c.bench_function("decapsulate (ML-KEM-768)", |b| {
-        b.iter(|| {
-            let ss = client_kem.decapsulate(&ct).unwrap();
-            black_box(ss);
-        })
+        b.iter_batched(
+            || EphemeralKemKey::new().unwrap(),
+            |kem| {
+                let ss = kem.decapsulate(&ct).unwrap();
+                black_box(ss);
+            },
+            BatchSize::SmallInput,
+        )
     });
 }
 
@@ -121,31 +129,22 @@ fn bench_full_handshake(c: &mut Criterion) {
             // honest worst-case timing if regenerated).
             let server = PqKeyExchange::new().unwrap();
             let client_kem = EphemeralKemKey::new().unwrap();
+            let client_ek = client_kem.ek_bytes.clone();
 
             let cr = random_bytes::<32>();
             let sr = random_bytes::<32>();
 
             // Server side
-            let (ct, server_ss) = encapsulate_to(&client_kem.ek_bytes).unwrap();
-            let server_transcript = transcript_hash(
-                &cr,
-                &sr,
-                &client_kem.ek_bytes,
-                server.falcon_pk_bytes(),
-                &ct,
-            );
+            let (ct, server_ss) = encapsulate_to(&client_ek).unwrap();
+            let server_transcript =
+                transcript_hash(&cr, &sr, &client_ek, server.falcon_pk_bytes(), &ct);
             let sig = server.sign_transcript(&server_transcript).unwrap();
             let server_session_key = derive_session_key(&server_ss, &server_transcript);
 
             // Client side
             let client_ss = client_kem.decapsulate(&ct).unwrap();
-            let client_transcript = transcript_hash(
-                &cr,
-                &sr,
-                &client_kem.ek_bytes,
-                server.falcon_pk_bytes(),
-                &ct,
-            );
+            let client_transcript =
+                transcript_hash(&cr, &sr, &client_ek, server.falcon_pk_bytes(), &ct);
             let ok =
                 PqKeyExchange::verify_falcon(&client_transcript, &sig, server.falcon_pk_bytes())
                     .unwrap();

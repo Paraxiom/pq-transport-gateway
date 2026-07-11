@@ -187,7 +187,11 @@ impl ServerHandshake<HelloAccepted> {
             None => s.pqc_secret,
         };
         let session_key = derive_session_key(&final_secret, &s.transcript);
-        let session = PqSession::new(&session_key, random_bytes::<32>(), s.client_falcon_vk.clone())?;
+        let session = PqSession::new(
+            &session_key,
+            random_bytes::<32>(),
+            s.client_falcon_vk.clone(),
+        )?;
         Ok((session, s.client_falcon_vk))
     }
 }
@@ -491,11 +495,16 @@ mod tests {
 
         // Client re-derives the session key (single-use ephemeral key) and
         // decrypts a server-encrypted message — proving both sides agree.
-        let client_ss = client_kem.decapsulate(&server_hello.kem_ciphertext).unwrap();
+        let client_ss = client_kem
+            .decapsulate(&server_hello.kem_ciphertext)
+            .unwrap();
         let client_session_key = derive_session_key(&client_ss, &transcript);
-        let client_session =
-            PqSession::new(&client_session_key, random_bytes::<32>(), server_hello.falcon_vk)
-                .unwrap();
+        let client_session = PqSession::new(
+            &client_session_key,
+            random_bytes::<32>(),
+            server_hello.falcon_vk,
+        )
+        .unwrap();
 
         let (ct, nonce) = server_session.encrypt(b"quantum-safe hello").unwrap();
         let pt = client_session.decrypt(&ct, &nonce).unwrap();

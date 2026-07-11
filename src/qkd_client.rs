@@ -27,6 +27,7 @@ use base64::{engine::general_purpose, Engine as _};
 use reqwest::{Certificate, Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
+use zeroize::Zeroizing;
 
 // ── ETSI 014 v1.1.1 §5.1 Status object ──────────────────────────────────────
 
@@ -114,12 +115,54 @@ pub struct KeyID {
 
 // ── Decoded form for internal proxy use ─────────────────────────────────────
 
-/// A QKD key after base64 decoding. Internal type; the wire format is
-/// the ETSI `Key` above with base64 string.
-#[derive(Debug)]
+/// A QKD key after base64 decoding.
+///
+/// **Single-use by construction.** The key material can be extracted exactly
+/// once, via [`into_material`], which consumes `self`. A QKD key is one-time-pad
+/// material; using it twice is a *compile error*, not a runtime hope. The
+/// material is held in [`Zeroizing`] and wiped from memory on drop, and is
+/// redacted from `Debug` so it can never leak into logs.
+///
+/// [`into_material`]: QkdKey::into_material
 pub struct QkdKey {
-    pub key_id: String,
-    pub key_data: Vec<u8>,
+    key_id: String,
+    key_data: Zeroizing<Vec<u8>>,
+}
+
+impl std::fmt::Debug for QkdKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QkdKey")
+            .field("key_id", &self.key_id)
+            .field(
+                "key_data",
+                &format_args!("<{} bytes redacted>", self.key_data.len()),
+            )
+            .finish()
+    }
+}
+
+impl QkdKey {
+    pub(crate) fn new(key_id: String, key_data: Vec<u8>) -> Self {
+        Self {
+            key_id,
+            key_data: Zeroizing::new(key_data),
+        }
+    }
+
+    /// The key's ETSI `key_ID` — a public identifier, not secret material,
+    /// so it is freely readable and does not consume the key.
+    pub fn key_id(&self) -> &str {
+        &self.key_id
+    }
+
+    /// Consume the key and return its material.
+    ///
+    /// Takes `self` **by value**: QKD key material is one-time-pad and must be
+    /// used exactly once. After this call the key is gone, so a second use is
+    /// a compile error — the one-time discipline enforced by the type system.
+    pub fn into_material(self) -> Zeroizing<Vec<u8>> {
+        self.key_data
+    }
 }
 
 // ── Client ──────────────────────────────────────────────────────────────────
@@ -292,10 +335,7 @@ impl QkdClient {
             "Retrieved QKD key: id={}, size={} bytes",
             key.key_ID, size_bytes
         );
-        Ok(QkdKey {
-            key_id: key.key_ID,
-            key_data: bytes,
-        })
+        Ok(QkdKey::new(key.key_ID, bytes))
     }
 
     /// Fetch keys-by-ID against the default master SAE_ID. Used by the slave
@@ -323,10 +363,7 @@ impl QkdClient {
             let bytes = general_purpose::STANDARD
                 .decode(&key.key)
                 .map_err(|e| anyhow!("ETSI 014 key {} has invalid base64: {}", key.key_ID, e))?;
-            out.push(QkdKey {
-                key_id: key.key_ID,
-                key_data: bytes,
-            });
+            out.push(QkdKey::new(key.key_ID, bytes));
         }
         Ok(out)
     }
@@ -335,6 +372,26 @@ impl QkdClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qkd_key_is_one_time_and_redacts_material() {
+        let k = QkdKey::new("k1".to_string(), vec![0xABu8; 32]);
+
+        // The public key_ID is freely readable and does not consume the key.
+        assert_eq!(k.key_id(), "k1");
+
+        // Debug must never leak key material.
+        let dbg = format!("{k:?}");
+        assert!(dbg.contains("redacted"), "Debug did not redact: {dbg}");
+        assert!(!dbg.contains("171"), "Debug leaked raw key bytes: {dbg}");
+
+        // Material can be extracted exactly once; it consumes the key.
+        let material = k.into_material();
+        assert_eq!(&material[..], &[0xABu8; 32][..]);
+
+        // A second `k.into_material()` here would NOT compile (value moved) —
+        // that is the one-time-pad guarantee, enforced by the type system.
+    }
 
     /// Status field cardinality matches ETSI 014 v1.1.1 §5.1: 11 required
     /// fields, 1 optional `status_extension`.

@@ -241,8 +241,10 @@ impl ProxyServer {
         // ── Optional QKD mixing ─────────────────────────────────────────────
         let final_secret = match self.qkd_client.get_key(32).await {
             Ok(qkd_key) => {
-                audit::log_qkd_key_used(peer_addr, &qkd_key.key_id);
-                mix_keys(&qkd_key.key_data, &pqc_secret)
+                audit::log_qkd_key_used(peer_addr, qkd_key.key_id());
+                // Consume the key: QKD material is one-time, used exactly once here.
+                let material = qkd_key.into_material();
+                mix_keys(&material, &pqc_secret)
             }
             Err(_) => {
                 warn!("QKD not available, using PQC-only mode");
@@ -310,9 +312,10 @@ impl ProxyServer {
             return Err(anyhow!("Requested key size exceeds maximum"));
         }
         let qkd_key = self.qkd_client.get_key(request.size).await?;
+        let key_id = qkd_key.key_id().to_string();
         Ok(KeyResponse {
-            key_id: qkd_key.key_id.clone(),
-            key_data: qkd_key.key_data,
+            key_id,
+            key_data: qkd_key.into_material().to_vec(),
             metadata: KeyMetadata {
                 algorithm: "QKD-BB84".to_string(),
                 created_at: chrono::Utc::now().timestamp(),

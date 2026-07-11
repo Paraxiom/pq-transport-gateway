@@ -198,6 +198,16 @@ impl EphemeralKemKey {
     /// construction. After decapsulation the key is consumed and its
     /// decapsulation secret dropped, so a second use is a *compile error* —
     /// forward secrecy enforced at the type level, not by convention.
+    ///
+    /// Reusing an ephemeral key does not compile:
+    ///
+    /// ```compile_fail
+    /// use pq_transport_gateway::EphemeralKemKey;
+    /// let key = EphemeralKemKey::new().unwrap();
+    /// let ct = [0u8; 1088];
+    /// let _ = key.decapsulate(&ct); // consumes the single-use key
+    /// let _ = key.decapsulate(&ct); // error[E0382]: use of moved value
+    /// ```
     pub fn decapsulate(self, ciphertext: &[u8]) -> Result<[u8; 32]> {
         if ciphertext.len() != ML_KEM_768_CT_LEN {
             return Err(anyhow!(

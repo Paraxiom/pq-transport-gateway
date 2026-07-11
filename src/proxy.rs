@@ -49,7 +49,7 @@ pub struct ClientHello {
     pub requested_key_size: usize,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ServerHello {
     pub version: String,
     pub server_random: [u8; 32],
@@ -86,6 +86,105 @@ pub struct KeyMetadata {
 const PROTOCOL_VERSION: &str = "2.0";
 const MAX_HELLO_BYTES: usize = 16 * 1024;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+
+// ── Type-state server handshake ─────────────────────────────────────────────
+//
+// The PQ handshake is modelled as a state machine whose states are types.
+// A `PqSession` — the only thing that can encrypt/decrypt application data —
+// can be produced *solely* by `ServerHandshake::<HelloAccepted>::into_session`.
+// You therefore cannot send or receive data before the handshake has been
+// completed in order (encapsulate → transcript → sign → derive). The ordering
+// is enforced by the compiler, not by convention.
+
+/// Initial handshake state: no client hello processed yet.
+pub struct AwaitingHello;
+
+/// Reached after a client hello has been accepted: the `ServerHello` is ready
+/// to send and the shared secret / transcript are committed.
+pub struct HelloAccepted {
+    server_hello: ServerHello,
+    pqc_secret: [u8; 32],
+    transcript: [u8; 32],
+    client_falcon_vk: Vec<u8>,
+}
+
+/// Server-side PQ handshake, parameterised by protocol state `S`.
+pub struct ServerHandshake<S> {
+    state: S,
+}
+
+impl ServerHandshake<AwaitingHello> {
+    pub fn new() -> Self {
+        Self {
+            state: AwaitingHello,
+        }
+    }
+
+    /// Encapsulate against the (already length-validated, authorized) client
+    /// hello, build and sign the transcript, and prepare the `ServerHello`.
+    /// Consumes `self`; on success advances to `HelloAccepted`.
+    pub fn respond(
+        self,
+        client_hello: &ClientHello,
+        host_key: &PqKeyExchange,
+    ) -> Result<ServerHandshake<HelloAccepted>> {
+        let (kem_ciphertext, pqc_secret) = encapsulate_to(&client_hello.kem_ek)?;
+        let server_random = random_bytes::<32>();
+        let transcript = transcript_hash(
+            &client_hello.client_random,
+            &server_random,
+            &client_hello.kem_ek,
+            host_key.falcon_pk_bytes(),
+            &kem_ciphertext,
+        );
+        let transcript_sig = host_key.sign_transcript(&transcript)?;
+        let server_hello = ServerHello {
+            version: PROTOCOL_VERSION.to_string(),
+            server_random,
+            falcon_vk: host_key.falcon_pk_bytes().to_vec(),
+            slh_dsa_vk: host_key.slh_dsa_pk_bytes().to_vec(),
+            kem_ciphertext,
+            transcript_sig,
+        };
+        Ok(ServerHandshake {
+            state: HelloAccepted {
+                server_hello,
+                pqc_secret,
+                transcript,
+                client_falcon_vk: client_hello.falcon_vk.clone(),
+            },
+        })
+    }
+}
+
+impl ServerHandshake<HelloAccepted> {
+    /// The `ServerHello` to write to the wire. Only exists in this state, so
+    /// it cannot be sent before a client hello has been accepted.
+    pub fn server_hello(&self) -> &ServerHello {
+        &self.state.server_hello
+    }
+
+    /// Derive the session — optionally mixing in one-time QKD key material —
+    /// and yield the established `PqSession` plus the client's Falcon vk.
+    /// Consumes `self`: this is the *only* constructor of a live session, so
+    /// no data can flow before the handshake is complete.
+    pub fn into_session(self, qkd_material: Option<&[u8]>) -> Result<(PqSession, Vec<u8>)> {
+        let s = self.state;
+        let final_secret = match qkd_material {
+            Some(m) => mix_keys(m, &s.pqc_secret),
+            None => s.pqc_secret,
+        };
+        let session_key = derive_session_key(&final_secret, &s.transcript);
+        let session = PqSession::new(&session_key, random_bytes::<32>(), s.client_falcon_vk.clone())?;
+        Ok((session, s.client_falcon_vk))
+    }
+}
+
+impl Default for ServerHandshake<AwaitingHello> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl ProxyServer {
     pub async fn new(config: Arc<Config>) -> Result<Self> {
@@ -214,51 +313,27 @@ impl ProxyServer {
             }
         }
 
-        // ── Encapsulate against client's KEM EK ─────────────────────────────
-        let (kem_ciphertext, pqc_secret) = encapsulate_to(&client_hello.kem_ek)?;
-        let server_random = random_bytes::<32>();
+        // ── Type-state handshake: encapsulate, build + sign transcript ──────
+        let handshake = ServerHandshake::new().respond(&client_hello, &self.host_key)?;
+        write_framed(stream, handshake.server_hello()).await?;
 
-        // ── Build + sign transcript ─────────────────────────────────────────
-        let transcript = transcript_hash(
-            &client_hello.client_random,
-            &server_random,
-            &client_hello.kem_ek,
-            self.host_key.falcon_pk_bytes(),
-            &kem_ciphertext,
-        );
-        let transcript_sig = self.host_key.sign_transcript(&transcript)?;
-
-        let server_hello = ServerHello {
-            version: PROTOCOL_VERSION.to_string(),
-            server_random,
-            falcon_vk: self.host_key.falcon_pk_bytes().to_vec(),
-            slh_dsa_vk: self.host_key.slh_dsa_pk_bytes().to_vec(),
-            kem_ciphertext,
-            transcript_sig,
-        };
-        write_framed(stream, &server_hello).await?;
-
-        // ── Optional QKD mixing ─────────────────────────────────────────────
-        let final_secret = match self.qkd_client.get_key(32).await {
+        // ── Optional one-time QKD mixing ────────────────────────────────────
+        let qkd_material = match self.qkd_client.get_key(32).await {
             Ok(qkd_key) => {
                 audit::log_qkd_key_used(peer_addr, qkd_key.key_id());
-                // Consume the key: QKD material is one-time, used exactly once here.
-                let material = qkd_key.into_material();
-                mix_keys(&material, &pqc_secret)
+                // Consume the key: QKD material is one-time, used exactly once.
+                Some(qkd_key.into_material())
             }
             Err(_) => {
                 warn!("QKD not available, using PQC-only mode");
-                pqc_secret
+                None
             }
         };
-        let session_key = derive_session_key(&final_secret, &transcript);
 
-        let session = PqSession::new(
-            &session_key,
-            random_bytes::<32>(),
-            client_hello.falcon_vk.clone(),
-        )?;
-        Ok((session, client_hello.falcon_vk))
+        // `into_session` is the ONLY way to obtain a live `PqSession`, so no
+        // data can flow before the handshake has completed in order.
+        let qkd_ref = qkd_material.as_ref().map(|m| m.as_slice());
+        handshake.into_session(qkd_ref)
     }
 
     async fn handle_session(
@@ -348,4 +423,70 @@ async fn write_framed<T: Serialize>(stream: &mut TcpStream, msg: &T) -> Result<(
     stream.write_all(&bytes).await?;
     stream.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::EphemeralKemKey;
+
+    /// End-to-end check of the type-state server handshake (previously the
+    /// handshake path had no unit coverage). Drives the state machine the way
+    /// `perform_handshake` does, then verifies a client can (a) verify the
+    /// server's transcript signature and (b) derive the *same* session key and
+    /// decrypt server traffic — proving key agreement.
+    #[test]
+    fn server_handshake_binds_transcript_and_agrees_on_session_key() {
+        let host_key = PqKeyExchange::new().unwrap();
+
+        // Client materials.
+        let client_kem = EphemeralKemKey::new().unwrap();
+        let client_ek = client_kem.ek_bytes.clone();
+        let client_random = random_bytes::<32>();
+        let client_id = PqKeyExchange::new().unwrap();
+        let hello = ClientHello {
+            version: PROTOCOL_VERSION.to_string(),
+            client_random,
+            kem_ek: client_ek.clone(),
+            falcon_vk: client_id.falcon_pk_bytes().to_vec(),
+            slh_dsa_vk: client_id.slh_dsa_pk_bytes().to_vec(),
+            requested_key_size: 32,
+        };
+
+        // Server side: AwaitingHello -> HelloAccepted -> Established session.
+        let handshake = ServerHandshake::new().respond(&hello, &host_key).unwrap();
+        let server_hello = handshake.server_hello().clone();
+        let (mut server_session, returned_vk) = handshake.into_session(None).unwrap();
+        assert_eq!(returned_vk, hello.falcon_vk);
+
+        // The server's transcript signature must verify under its Falcon vk.
+        let transcript = transcript_hash(
+            &client_random,
+            &server_hello.server_random,
+            &client_ek,
+            &server_hello.falcon_vk,
+            &server_hello.kem_ciphertext,
+        );
+        assert!(
+            PqKeyExchange::verify_falcon(
+                &transcript,
+                &server_hello.transcript_sig,
+                &server_hello.falcon_vk
+            )
+            .unwrap(),
+            "server transcript signature must verify"
+        );
+
+        // Client re-derives the session key (single-use ephemeral key) and
+        // decrypts a server-encrypted message — proving both sides agree.
+        let client_ss = client_kem.decapsulate(&server_hello.kem_ciphertext).unwrap();
+        let client_session_key = derive_session_key(&client_ss, &transcript);
+        let client_session =
+            PqSession::new(&client_session_key, random_bytes::<32>(), server_hello.falcon_vk)
+                .unwrap();
+
+        let (ct, nonce) = server_session.encrypt(b"quantum-safe hello").unwrap();
+        let pt = client_session.decrypt(&ct, &nonce).unwrap();
+        assert_eq!(pt, b"quantum-safe hello");
+    }
 }

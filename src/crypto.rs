@@ -192,7 +192,13 @@ impl EphemeralKemKey {
         })
     }
 
-    pub fn decapsulate(&self, ciphertext: &[u8]) -> Result<[u8; 32]> {
+    /// Decapsulate the peer's ciphertext to recover the shared secret.
+    ///
+    /// Takes `self` **by value**: an ephemeral KEM key is single-use by
+    /// construction. After decapsulation the key is consumed and its
+    /// decapsulation secret dropped, so a second use is a *compile error* —
+    /// forward secrecy enforced at the type level, not by convention.
+    pub fn decapsulate(self, ciphertext: &[u8]) -> Result<[u8; 32]> {
         if ciphertext.len() != ML_KEM_768_CT_LEN {
             return Err(anyhow!(
                 "ML-KEM-768 ciphertext wrong size: expected {} bytes, got {}",
@@ -748,12 +754,14 @@ mod tests {
         let server_sig = server.sign_transcript(&server_transcript).unwrap();
         let server_session_key = derive_session_key(&server_ss, &server_transcript);
 
-        // Client side: decapsulate, rebuild transcript, verify signature.
+        // Client side: capture the public EK for the transcript, then
+        // decapsulate — which consumes the single-use ephemeral key.
+        let client_ek = client_kem.ek_bytes.clone();
         let client_ss = client_kem.decapsulate(&ct).unwrap();
         let client_transcript = transcript_hash(
             &client_random,
             &server_random,
-            &client_kem.ek_bytes,
+            &client_ek,
             server.falcon_pk_bytes(),
             &ct,
         );
@@ -828,14 +836,15 @@ mod tests {
         // signed-encrypted payload from server to client.
         let server = PqKeyExchange::new().unwrap();
         let client_kem = EphemeralKemKey::new().unwrap();
-        let (ct, server_ss) = encapsulate_to(&client_kem.ek_bytes).unwrap();
+        let client_ek = client_kem.ek_bytes.clone();
+        let (ct, server_ss) = encapsulate_to(&client_ek).unwrap();
         let client_ss = client_kem.decapsulate(&ct).unwrap();
         let client_random = random_bytes::<32>();
         let server_random = random_bytes::<32>();
         let transcript = transcript_hash(
             &client_random,
             &server_random,
-            &client_kem.ek_bytes,
+            &client_ek,
             server.falcon_pk_bytes(),
             &ct,
         );

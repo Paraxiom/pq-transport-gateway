@@ -21,13 +21,7 @@ path = "src/lib.rs"
 # Provides ML-KEM (FIPS 203), ML-DSA (FIPS 204), SLH-DSA (FIPS 205), Falcon
 paraxiom-pqc = { git = "https://github.com/Paraxiom/paraxiom-pqc.git" }
 
-# Pre-release transitive pins required by paraxiom-pqc's ml-dsa-rc.7 etc.
-# Cargo prefers releases over pre-releases by default; without these pins
-# it picks pkcs8 0.11.0 (release) and ml-dsa-rc.7 fails to compile.
-pkcs8 = { version = "=0.11.0-rc.11", default-features = false }
-spki = { version = "=0.8.0-rc.4", default-features = false }
-signature = { version = "=3.0.0-rc.10", default-features = false }
-sha2 = { version = "=0.11.0-rc.5", default-features = false }
+# Transitive versions are resolved from the vendored ml-dsa/slh-dsa forks.
 
 # Symmetric cryptography (NIST approved)
 aes-gcm = "0.10"

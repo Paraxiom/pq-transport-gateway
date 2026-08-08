@@ -134,6 +134,19 @@ Despite the `2.0.0` major number, this should still be considered
 ergonomics, mutual auth, and DoS hardening. Pin exactly (`= "2.0.0"`)
 until those land if you depend on this for anything load-bearing.
 
+## Open-core boundary
+
+The anomaly-detection **method** in `src/anomaly.rs` is public and auditable. The QBER
+measurement data it is trained on, and any models derived from it, are proprietary and are
+not distributed.
+
 ## License
 
-Dual-licensed under MIT or Apache-2.0, at your option.
+**GPL-3.0-only**, or a **Paraxiom commercial licence**, at your option — see `LICENSE.md`.
+
+Use, study, modify and redistribute freely under GPL-3.0. If you wish to embed this
+software in a **proprietary** product without publishing your source, a commercial
+licence is required: sylvain@paraxiom.org
+
+Releases published before 8 August 2026 were under `MIT OR Apache-2.0`; that change is
+not retroactive.

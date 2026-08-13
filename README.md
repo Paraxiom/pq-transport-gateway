@@ -104,6 +104,9 @@ falcon512+slh-dsa-shake128f <base64(falcon_vk(897) || slh_dsa_vk(32))> perm=read
 - **Authenticated key agreement**: server signs the full handshake transcript
 - **Forward secrecy**: ephemeral ML-KEM keypair per handshake
 - **Audit logging**: every key request signed with SLH-DSA (hash-based, stateless)
+- **Standards status**: Falcon (FN-DSA, FIPS 206) is still a draft standard. PQTG pairs it
+  with SLH-DSA (FIPS 205, final) for client authentication, so authentication never rests
+  on a draft standard alone
 
 ## Formal verification
 

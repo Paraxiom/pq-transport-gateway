@@ -301,6 +301,15 @@ impl QkdClient {
     /// Fetch a single key against the default slave SAE_ID, with a specified
     /// key size in bytes (translated to bits per the ETSI 014 wire spec).
     pub async fn get_key(&self, size_bytes: usize) -> Result<QkdKey> {
+        let default_sae = self.default_slave_sae_id.clone();
+        self.get_key_for_sae(&default_sae, size_bytes).await
+    }
+
+    /// Fetch a single key for a specific slave SAE_ID (wire-protocol v3: the
+    /// client presents its own SAE-ID in ClientHello and the server allocates
+    /// the QKD key for that slave, so the client can later run `dec_keys`
+    /// against its own KME with the transcript-bound `key_ID`).
+    pub async fn get_key_for_sae(&self, slave_sae_id: &str, size_bytes: usize) -> Result<QkdKey> {
         // Issue #5: defensive overflow check. Bounded by max_key_size = 1 MB
         // in practice, but `checked_mul` future-proofs against config bumps.
         let size_bits: u32 = size_bytes
@@ -317,7 +326,7 @@ impl QkdClient {
             size: Some(size_bits),
             ..Default::default()
         };
-        let container = self.enc_keys(&self.default_slave_sae_id, &req).await?;
+        let container = self.enc_keys(slave_sae_id, &req).await?;
         let key = container
             .keys
             .into_iter()

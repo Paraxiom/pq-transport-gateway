@@ -136,11 +136,21 @@ async fn main() -> Result<()> {
     writer.abort();
 
     let mb = payload_size as f64 / (1024.0 * 1024.0);
-    println!("     sent and echoed {mb:.0} MiB in {:.2} s", elapsed.as_secs_f64());
-    println!("     round trip throughput {:.1} MiB/s", mb / elapsed.as_secs_f64());
+    println!(
+        "     sent and echoed {mb:.0} MiB in {:.2} s",
+        elapsed.as_secs_f64()
+    );
+    println!(
+        "     round trip throughput {:.1} MiB/s",
+        mb / elapsed.as_secs_f64()
+    );
     println!(
         "     payload identical after the round trip: {}",
-        if echoed == payload { "yes" } else { "NO — BROKEN" }
+        if echoed == payload {
+            "yes"
+        } else {
+            "NO — BROKEN"
+        }
     );
 
     // ---- 4. concurrency ---------------------------------------------------

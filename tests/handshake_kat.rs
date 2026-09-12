@@ -16,15 +16,14 @@
 //! refactor), publish a NEW vector set (v3) and keep this one for v2 interop.
 
 use pq_qkd_proxy::crypto::{
-    compute_identity_fingerprint, derive_session_key, format_fingerprint, mix_keys,
-    transcript_hash,
+    compute_identity_fingerprint, derive_session_key, format_fingerprint, mix_keys, transcript_hash,
 };
 use serde_json::Value;
 
 const VECTORS: &str = include_str!("vectors/handshake-v2.json");
 
 fn hex_decode(s: &str) -> Vec<u8> {
-    assert!(s.len() % 2 == 0, "odd-length hex");
+    assert!(s.len().is_multiple_of(2), "odd-length hex");
     (0..s.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("bad hex"))
@@ -91,17 +90,32 @@ fn vector_file_declares_the_v2_labels() {
     assert_eq!(v["labels"]["transcript"], "pqtg-transcript-v2");
     assert_eq!(v["labels"]["session_kdf"], "pqtg-session-v2");
     assert_eq!(v["labels"]["key_mixing"], "pqtg-key-mixing-v2");
-    assert_eq!(v["labels"]["identity_fingerprint"], "pqtg-identity-fingerprint-v1");
+    assert_eq!(
+        v["labels"]["identity_fingerprint"],
+        "pqtg-identity-fingerprint-v1"
+    );
     // Input lengths match the ML-KEM-768 / Falcon-512 wire sizes the proxy enforces.
-    assert_eq!(v["inputs"]["client_kem_ek"]["len"], pq_qkd_proxy::crypto::ML_KEM_768_EK_LEN);
-    assert_eq!(v["inputs"]["server_falcon_pk"]["len"], pq_qkd_proxy::crypto::FALCON_512_VK_LEN);
-    assert_eq!(v["inputs"]["kem_ciphertext"]["len"], pq_qkd_proxy::crypto::ML_KEM_768_CT_LEN);
+    assert_eq!(
+        v["inputs"]["client_kem_ek"]["len"],
+        pq_qkd_proxy::crypto::ML_KEM_768_EK_LEN
+    );
+    assert_eq!(
+        v["inputs"]["server_falcon_pk"]["len"],
+        pq_qkd_proxy::crypto::FALCON_512_VK_LEN
+    );
+    assert_eq!(
+        v["inputs"]["kem_ciphertext"]["len"],
+        pq_qkd_proxy::crypto::ML_KEM_768_CT_LEN
+    );
 }
 
 #[test]
 fn kat_transcript_hash() {
     let k = load();
-    assert_eq!(hex_encode(&k.transcript()), k.expected_hex("transcript_hash"));
+    assert_eq!(
+        hex_encode(&k.transcript()),
+        k.expected_hex("transcript_hash")
+    );
 }
 
 #[test]
@@ -156,5 +170,8 @@ fn kat_identity_fingerprint() {
     let k = load();
     let fp = compute_identity_fingerprint(&k.server_falcon_pk(), &k.input_bytes("slh_dsa_vk"));
     assert_eq!(hex_encode(&fp), k.expected_hex("identity_fingerprint"));
-    assert_eq!(format_fingerprint(&fp), k.expected_hex("identity_fingerprint_formatted"));
+    assert_eq!(
+        format_fingerprint(&fp),
+        k.expected_hex("identity_fingerprint_formatted")
+    );
 }

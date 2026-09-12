@@ -69,12 +69,12 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
+use socket2::{SockRef, TcpKeepalive};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use socket2::{SockRef, TcpKeepalive};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, info, warn};
@@ -349,7 +349,7 @@ pub struct DirectionalCipher {
 
 impl DirectionalCipher {
     fn new(key: &[u8; 32]) -> Self {
-        use aes_gcm::{KeyInit, Aes256Gcm};
+        use aes_gcm::{Aes256Gcm, KeyInit};
         let cipher = Aes256Gcm::new(key.into());
         Self {
             cipher,
@@ -380,12 +380,11 @@ impl DirectionalCipher {
         if self.nonce_counter < REKEY_EVERY_RECORDS {
             return Ok(());
         }
-        use aes_gcm::{KeyInit, Aes256Gcm};
+        use aes_gcm::{Aes256Gcm, KeyInit};
 
-        let next_epoch = self
-            .epoch
-            .checked_add(1)
-            .ok_or_else(|| anyhow!("ratchet epoch exhausted; the session must be re-established"))?;
+        let next_epoch = self.epoch.checked_add(1).ok_or_else(|| {
+            anyhow!("ratchet epoch exhausted; the session must be re-established")
+        })?;
 
         let mut h = Sha3_256::new();
         h.update(RATCHET_LABEL);
@@ -459,7 +458,11 @@ pub struct RelaySession {
     pub send: DirectionalCipher,
     /// Opens what this end receives.
     pub recv: DirectionalCipher,
-    /// The peer's Falcon verification key, for logging and pinning.
+    /// The peer's Falcon verification key. Exposed for logging and for the
+    /// server-side client allow-list that does not exist yet (finding R1,
+    /// backlog B10); until then nothing in the binary reads it, hence the
+    /// bin-side allow (the library API keeps it).
+    #[allow(dead_code)]
     pub peer_falcon_vk: Vec<u8>,
 }
 
@@ -489,10 +492,7 @@ impl ServerPin {
             .decode(b64)
             .map_err(|e| anyhow!("pin is not valid base64: {e}"))?;
         if bytes.len() != 32 {
-            return Err(anyhow!(
-                "pin decodes to {} bytes, expected 32",
-                bytes.len()
-            ));
+            return Err(anyhow!("pin decodes to {} bytes, expected 32", bytes.len()));
         }
         let mut out = [0u8; 32];
         out.copy_from_slice(&bytes);
@@ -573,8 +573,7 @@ pub async fn client_handshake(
     // Pin check BEFORE the signature check. The signature below is verified
     // under the key the server just sent; only the pin says that key is the
     // right one. Public values, so a plain comparison is fine.
-    let presented =
-        compute_identity_fingerprint(&server_hello.falcon_vk, &server_hello.slh_dsa_vk);
+    let presented = compute_identity_fingerprint(&server_hello.falcon_vk, &server_hello.slh_dsa_vk);
     match policy {
         PinPolicy::Require(pin) => {
             if &presented != pin.as_bytes() {
@@ -618,16 +617,8 @@ pub async fn client_handshake(
 
     // The client sends on c2s and receives on s2c.
     Ok(RelaySession {
-        send: DirectionalCipher::new(&derive_directional_key(
-            &secret,
-            &transcript,
-            KDF_LABEL_C2S,
-        )),
-        recv: DirectionalCipher::new(&derive_directional_key(
-            &secret,
-            &transcript,
-            KDF_LABEL_S2C,
-        )),
+        send: DirectionalCipher::new(&derive_directional_key(&secret, &transcript, KDF_LABEL_C2S)),
+        recv: DirectionalCipher::new(&derive_directional_key(&secret, &transcript, KDF_LABEL_S2C)),
         peer_falcon_vk: server_hello.falcon_vk,
     })
 }
@@ -682,16 +673,8 @@ pub async fn server_handshake(
 
     // The server sends on s2c and receives on c2s: the mirror of the client.
     Ok(RelaySession {
-        send: DirectionalCipher::new(&derive_directional_key(
-            &secret,
-            &transcript,
-            KDF_LABEL_S2C,
-        )),
-        recv: DirectionalCipher::new(&derive_directional_key(
-            &secret,
-            &transcript,
-            KDF_LABEL_C2S,
-        )),
+        send: DirectionalCipher::new(&derive_directional_key(&secret, &transcript, KDF_LABEL_S2C)),
+        recv: DirectionalCipher::new(&derive_directional_key(&secret, &transcript, KDF_LABEL_C2S)),
         peer_falcon_vk: hello.falcon_vk,
     })
 }
@@ -728,9 +711,7 @@ pub async fn splice_with_idle_timeout(
     let (mut plain_r, mut plain_w) = plain.into_split();
     let (mut enc_r, mut enc_w) = encrypted.into_split();
     let RelaySession {
-        mut send,
-        mut recv,
-        ..
+        mut send, mut recv, ..
     } = session;
 
     // plaintext in, sealed out
@@ -785,19 +766,17 @@ pub async fn splice_with_idle_timeout(
         let mut total = 0u64;
         let mut records = 0u64;
         loop {
-            let record = match tokio::time::timeout(
-                idle,
-                read_len_prefixed(&mut enc_r, MAX_RECORD_BYTES),
-            )
-            .await
-            {
-                Err(_) => {
-                    debug!("relay: encrypted side idle for {idle:?}, reaping");
-                    break;
-                }
-                Ok(Ok(r)) => r,
-                Ok(Err(_)) => break,
-            };
+            let record =
+                match tokio::time::timeout(idle, read_len_prefixed(&mut enc_r, MAX_RECORD_BYTES))
+                    .await
+                {
+                    Err(_) => {
+                        debug!("relay: encrypted side idle for {idle:?}, reaping");
+                        break;
+                    }
+                    Ok(Ok(r)) => r,
+                    Ok(Err(_)) => break,
+                };
             let epoch_before = recv.epoch();
             let plaintext = match recv.open(&record) {
                 Ok(p) => p,
@@ -858,7 +837,10 @@ impl RelayServer {
         }
     }
 
-    /// Number of connections currently being relayed.
+    /// Number of connections currently being relayed. Library API (tests and
+    /// operators' tooling); the binary itself never asks, hence the bin-side
+    /// allow.
+    #[allow(dead_code)]
     pub fn live_connections(&self) -> u64 {
         self.live.load(Ordering::Relaxed)
     }
@@ -881,7 +863,10 @@ impl RelayServer {
             };
 
             if self.live.load(Ordering::Relaxed) >= self.max_connections as u64 {
-                warn!("relay at capacity ({}), dropping {peer}", self.max_connections);
+                warn!(
+                    "relay at capacity ({}), dropping {peer}",
+                    self.max_connections
+                );
                 continue;
             }
 
@@ -927,18 +912,18 @@ async fn handle_inbound(
     backend: SocketAddr,
 ) -> Result<()> {
     configure_socket(&stream, "inbound");
-    let session = match tokio::time::timeout(
-        HANDSHAKE_TIMEOUT,
-        server_handshake(&mut stream, &identity),
-    )
-    .await
-    {
-        Ok(r) => r?,
-        Err(_) => {
-            debug!("relay: {peer} did not complete the handshake in {HANDSHAKE_TIMEOUT:?}, dropping");
-            return Ok(());
-        }
-    };
+    let session =
+        match tokio::time::timeout(HANDSHAKE_TIMEOUT, server_handshake(&mut stream, &identity))
+            .await
+        {
+            Ok(r) => r?,
+            Err(_) => {
+                debug!(
+                "relay: {peer} did not complete the handshake in {HANDSHAKE_TIMEOUT:?}, dropping"
+            );
+                return Ok(());
+            }
+        };
     let upstream = TcpStream::connect(backend)
         .await
         .with_context(|| format!("relay could not reach backend {backend}"))?;
@@ -1113,9 +1098,10 @@ mod tests {
 
         let client_identity = PqKeyExchange::new().expect("id");
         let mut sock = TcpStream::connect(server_addr).await.expect("connect");
-        let mut session = client_handshake(&mut sock, &client_identity, PinPolicy::Require(server_pin))
-            .await
-            .expect("handshake");
+        let mut session =
+            client_handshake(&mut sock, &client_identity, PinPolicy::Require(server_pin))
+                .await
+                .expect("handshake");
 
         let secret = b"SECRETMARKER-do-not-let-this-appear-on-the-wire";
         let record = session.send.seal(secret).expect("seal");
@@ -1124,7 +1110,10 @@ mod tests {
             !record.windows(secret.len()).any(|w| w == secret),
             "the sealed record must not contain the plaintext"
         );
-        assert!(record.len() > secret.len(), "a sealed record carries nonce and tag");
+        assert!(
+            record.len() > secret.len(),
+            "a sealed record carries nonce and tag"
+        );
     }
 
     #[tokio::test]
@@ -1159,7 +1148,8 @@ mod tests {
         // nothing and costs the honest stream nothing either: the next genuine
         // record still opens.
         assert_eq!(
-            recv.open(&second).expect("the stream survives a rejected replay"),
+            recv.open(&second)
+                .expect("the stream survives a rejected replay"),
             b"record two",
             "a rejected replay must not break the legitimate stream"
         );
@@ -1200,7 +1190,9 @@ mod tests {
         tokio::spawn(async move {
             let _ = a.write_all(&huge).await;
         });
-        let err = read_len_prefixed(&mut b, MAX_RECORD_BYTES).await.unwrap_err();
+        let err = read_len_prefixed(&mut b, MAX_RECORD_BYTES)
+            .await
+            .unwrap_err();
         assert!(
             err.to_string().contains("exceeds"),
             "the length cap must reject before allocating, got: {err}"
@@ -1378,14 +1370,16 @@ mod tests {
                 c.write_all(&payload).await.expect("write");
                 let mut got = vec![0u8; payload.len()];
                 c.read_exact(&mut got).await.expect("read");
-                assert_eq!(got, payload, "connection {i} got another connection's bytes");
+                assert_eq!(
+                    got, payload,
+                    "connection {i} got another connection's bytes"
+                );
             }));
         }
         for h in handles {
             h.await.expect("connection task");
         }
     }
-
 
     // ---- ratchet -----------------------------------------------------------
 
@@ -1430,7 +1424,8 @@ mod tests {
         let after = a.seal(b"same plaintext").expect("seal");
         let before = b.seal(b"same plaintext").expect("seal");
         assert_ne!(
-            after[12..], before[12..],
+            after[12..],
+            before[12..],
             "the same plaintext must not encrypt identically across epochs"
         );
     }
@@ -1451,8 +1446,16 @@ mod tests {
             first_ever, first_of_epoch_one,
             "the first nonce of a new epoch must differ from the first of the last"
         );
-        assert_eq!(&first_ever[..4], &[0, 0, 0, 0], "epoch 0 in the top four bytes");
-        assert_eq!(&first_of_epoch_one[..4], &[0, 0, 0, 1], "epoch 1 in the top four bytes");
+        assert_eq!(
+            &first_ever[..4],
+            &[0, 0, 0, 0],
+            "epoch 0 in the top four bytes"
+        );
+        assert_eq!(
+            &first_of_epoch_one[..4],
+            &[0, 0, 0, 1],
+            "epoch 1 in the top four bytes"
+        );
     }
 
     #[tokio::test]
@@ -1504,7 +1507,9 @@ mod tests {
         // task, two file descriptors and a slot in the live-connection count
         // forever, because both directions were blocked on reads that would
         // never return and never error.
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind encrypted");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind encrypted");
         let addr = listener.local_addr().expect("encrypted addr");
         let server_identity = Arc::new(PqKeyExchange::new().expect("server identity"));
         let server_pin = ServerPin::of(&server_identity);
@@ -1518,9 +1523,13 @@ mod tests {
 
         let client_identity = PqKeyExchange::new().expect("client identity");
         let mut client = TcpStream::connect(addr).await.expect("connect encrypted");
-        let client_session = client_handshake(&mut client, &client_identity, PinPolicy::Require(server_pin))
-            .await
-            .expect("client handshake");
+        let client_session = client_handshake(
+            &mut client,
+            &client_identity,
+            PinPolicy::Require(server_pin),
+        )
+        .await
+        .expect("client handshake");
         // Held open deliberately: the far end is alive, it has simply gone quiet.
         let (_server_stream, _server_session) = accepted.await.expect("join server");
 

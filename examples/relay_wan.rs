@@ -43,8 +43,7 @@ async fn main() -> Result<()> {
     // ends up with empty relay logs and nothing to show for itself.
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .with_target(false)
         .init();
@@ -53,7 +52,9 @@ async fn main() -> Result<()> {
     if args.len() < 3 {
         eprintln!("usage:");
         eprintln!("  relay_wan server      <listen> <backend>");
-        eprintln!("  relay_wan client      <listen> <remote> --pin SHA3-256:<b64> | --insecure-no-pin");
+        eprintln!(
+            "  relay_wan client      <listen> <remote> --pin SHA3-256:<b64> | --insecure-no-pin"
+        );
         eprintln!("  relay_wan fingerprint <keyfile>            (creates the identity if missing)");
         eprintln!("  relay_wan echo        <listen>");
         eprintln!("  relay_wan bench       <target> <mib>");
@@ -67,8 +68,13 @@ async fn main() -> Result<()> {
             let identity = Arc::new(load_or_make_identity("relay_wan_server.key")?);
             let listener = TcpListener::bind(listen).await?;
             println!("relay server on {listen}, forwarding to {backend}");
-            println!("identity fingerprint {} (clients pin this)", ServerPin::of(&identity));
-            RelayServer::new(identity, backend, 256).serve(listener).await?;
+            println!(
+                "identity fingerprint {} (clients pin this)",
+                ServerPin::of(&identity)
+            );
+            RelayServer::new(identity, backend, 256)
+                .serve(listener)
+                .await?;
         }
         "client" => {
             let listen: std::net::SocketAddr = args[2].parse()?;
@@ -84,7 +90,9 @@ async fn main() -> Result<()> {
                     "relay client on {listen}, tunnelling to {remote}, UNPINNED (cannot authenticate the server)"
                 ),
             }
-            RelayClient::new(identity, remote, policy).serve(listener).await?;
+            RelayClient::new(identity, remote, policy)
+                .serve(listener)
+                .await?;
         }
         "fingerprint" => {
             let identity = load_or_make_identity(&args[2])?;
@@ -181,8 +189,11 @@ async fn bench(target: std::net::SocketAddr, mib: usize) -> Result<()> {
     samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let p50 = samples[samples.len() / 2];
     let p95 = samples[(samples.len() * 95) / 100];
-    println!("     p50 {p50:.1} ms   p95 {p95:.1} ms   min {:.1} ms   max {:.1} ms",
-             samples[0], samples[samples.len() - 1]);
+    println!(
+        "     p50 {p50:.1} ms   p95 {p95:.1} ms   min {:.1} ms   max {:.1} ms",
+        samples[0],
+        samples[samples.len() - 1]
+    );
     println!("     (each sample includes connect + a full ML-KEM + Falcon handshake)");
 
     // Steady state: one connection, many round trips. This is how a validator
@@ -205,12 +216,17 @@ async fn bench(target: std::net::SocketAddr, mib: usize) -> Result<()> {
         steady.push(t.elapsed().as_secs_f64() * 1000.0);
     }
     steady.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    println!("     p50 {:.1} ms   p95 {:.1} ms   min {:.1} ms   max {:.1} ms",
-             steady[steady.len() / 2],
-             steady[(steady.len() * 95) / 100],
-             steady[0],
-             steady[steady.len() - 1]);
-    println!("     ({} samples, no handshake, this is the consensus-vote number)", steady.len());
+    println!(
+        "     p50 {:.1} ms   p95 {:.1} ms   min {:.1} ms   max {:.1} ms",
+        steady[steady.len() / 2],
+        steady[(steady.len() * 95) / 100],
+        steady[0],
+        steady[steady.len() - 1]
+    );
+    println!(
+        "     ({} samples, no handshake, this is the consensus-vote number)",
+        steady.len()
+    );
     drop(c);
 
     // Throughput.
@@ -236,7 +252,10 @@ async fn bench(target: std::net::SocketAddr, mib: usize) -> Result<()> {
     let secs = t.elapsed().as_secs_f64();
     println!("     {mib} MiB round trip in {secs:.2} s");
     println!("     {:.1} MiB/s", mib as f64 / secs);
-    println!("     payload identical: {}", if echoed == payload { "yes" } else { "NO" });
+    println!(
+        "     payload identical: {}",
+        if echoed == payload { "yes" } else { "NO" }
+    );
     println!();
     Ok(())
 }

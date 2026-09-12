@@ -7,13 +7,13 @@ use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-mod relay;
 mod audit;
 mod auth;
 mod config;
 mod crypto;
 mod proxy;
 mod qkd_client;
+mod relay;
 
 use config::Config;
 use proxy::ProxyServer;
@@ -95,7 +95,6 @@ async fn main() -> Result<()> {
     }
 }
 
-
 /// Start the post-quantum relay in whichever mode the config selects.
 ///
 /// The relay uses the SAME appliance identity as the gateway, so a client that
@@ -157,7 +156,9 @@ fn spawn_relay(config: Arc<Config>) -> Result<()> {
             });
             info!("relay: client mode, {listen} -> {remote}");
         }
-        other => anyhow::bail!("unreachable relay mode {other}: config validation should have caught this"),
+        other => anyhow::bail!(
+            "unreachable relay mode {other}: config validation should have caught this"
+        ),
     }
     Ok(())
 }
@@ -206,7 +207,8 @@ fn generate_proxy_keys() -> Result<()> {
     // a drop-in sidecar. The directory of the key path is created below.
     let key_path = std::env::var("PQTG_IDENTITY_KEY")
         .unwrap_or_else(|_| "/etc/pq-qkd-proxy/proxy.key".to_string());
-    let base_dir = Path::new(&key_path).parent()
+    let base_dir = Path::new(&key_path)
+        .parent()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| "/etc/pq-qkd-proxy".to_string());
     let cert_path = format!("{base_dir}/proxy.pub");

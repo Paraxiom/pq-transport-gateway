@@ -324,7 +324,6 @@ impl Config {
     }
 }
 
-
 /// Does one allowlist entry cover this address?
 ///
 /// Returns false for anything that does not parse. A malformed entry must never
@@ -608,7 +607,7 @@ audit_log = "/var/log/pq-qkd-proxy/audit.log"
         // The dangerous failure would be treating an unparseable rule as a
         // wildcard. Each of these must match nothing.
         for bad in [
-            "10.0.0.0/33",   // prefix too long for v4
+            "10.0.0.0/33",    // prefix too long for v4
             "2001:db8::/129", // prefix too long for v6
             "not-an-address",
             "10.0.0.0/abc",

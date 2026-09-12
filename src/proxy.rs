@@ -19,11 +19,13 @@ use crate::{
         FALCON_512_VK_LEN, MIN_SESSION_FRAME_BYTES, ML_KEM_768_EK_LEN, SLH_DSA_SHAKE128F_VK_LEN,
     },
     qkd_client::QkdClient,
+    replay::{ReplayGuard, Verdict},
 };
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, error, info, warn};
@@ -35,6 +37,59 @@ pub struct ProxyServer {
     qkd_client: Arc<QkdClient>,
     authenticator: Arc<Authenticator>,
     host_key: Arc<PqKeyExchange>,
+    /// v3 hello replay guard (backlog B8): every admitted `client_random`
+    /// inside the freshness window. Shared by all connections; the critical
+    /// section is a hash lookup, and it is taken only after the signature has
+    /// verified, so unauthenticated traffic never touches it.
+    replay_guard: Arc<Mutex<ReplayGuard>>,
+}
+
+/// Seconds since the Unix epoch, the clock the v3 hello timestamp is compared
+/// against. A clock before 1970 reads as 0, which fails the freshness check.
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Everything the server checks on a v3 hello AFTER the allow-list and BEFORE
+/// spending anything on it (QKD allocation, encapsulation): proof of
+/// possession (B6), freshness and first sight (B8). The signature is checked
+/// first so only authenticated hellos reach the timestamp and the guard; the
+/// guard lock is held for a hash lookup only. Pure over its inputs so it can be
+/// tested without a socket.
+pub fn admit_hello_v3(
+    hello: &ClientHelloV3,
+    now_unix: u64,
+    max_skew_secs: u64,
+    guard: &Mutex<ReplayGuard>,
+    now: Instant,
+) -> Result<()> {
+    if !hello.verify_hello_sig()? {
+        return Err(anyhow!(
+            "hello signature does not verify under its falcon_vk"
+        ));
+    }
+    let skew = hello.timestamp.abs_diff(now_unix);
+    if skew > max_skew_secs {
+        return Err(anyhow!(
+            "hello timestamp is {skew} s from server time (max {max_skew_secs} s): stale, \
+             future-dated, or a replay"
+        ));
+    }
+    let mut guard = guard.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    match guard.check_and_insert(hello.client_random, now) {
+        Verdict::Fresh => Ok(()),
+        Verdict::Replay => Err(anyhow!(
+            "replayed ClientHello: this client_random was already admitted inside the window"
+        )),
+        Verdict::Full => Err(anyhow!(
+            "hello replay cache full at {} entries: refusing rather than reopening the replay \
+             window; raise proxy.hello_replay_cache_entries",
+            guard.len()
+        )),
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -102,6 +157,11 @@ pub struct ClientHelloV3 {
     /// True iff the client can run ETSI 014 `dec_keys` against a KME that
     /// shares keys with the server's KME. Drives QKD-vs-PQC negotiation.
     pub qkd_capable: bool,
+    /// Client clock, seconds since the Unix epoch, under the signature. The
+    /// server refuses a hello more than `proxy.hello_max_skew_secs` from its
+    /// own clock, so a recorded hello is worthless after the window; inside
+    /// it, the replay guard refuses a second sight (backlog B8).
+    pub timestamp: u64,
     /// Falcon-512 signature by the client's identity key (the one `falcon_vk`
     /// names) over `crypto::client_hello_digest_v3` of every field above.
     /// Proves the sender holds the allow-listed key and binds THIS `kem_ek` to
@@ -139,6 +199,7 @@ impl ClientHelloV3 {
     pub fn digest(&self) -> [u8; 32] {
         crate::crypto::client_hello_digest_v3(
             &self.client_random,
+            self.timestamp,
             &self.kem_ek,
             &self.falcon_vk,
             &self.slh_dsa_vk,
@@ -444,11 +505,18 @@ impl ProxyServer {
         let qkd_client = QkdClient::new(&config)?;
         let host_key = Self::load_or_generate_identity(&config.security.proxy_private_key)?;
         let authenticator = Authenticator::new(&config)?;
+        // The guard must remember a hello for the whole interval in which its
+        // timestamp is acceptable: 2 × skew after first sight (see replay.rs).
+        let replay_guard = Arc::new(Mutex::new(ReplayGuard::new(
+            Duration::from_secs(2 * config.proxy.hello_max_skew_secs),
+            config.proxy.hello_replay_cache_entries,
+        )));
         Ok(Self {
             config,
             qkd_client: Arc::new(qkd_client),
             authenticator: Arc::new(authenticator),
             host_key: Arc::new(host_key),
+            replay_guard,
         })
     }
 
@@ -627,19 +695,22 @@ impl ProxyServer {
             peer_addr,
         )?;
 
-        // ── Client proof of possession (Verifpal F1 / backlog B6) ───────────
-        // Before any QKD allocation. The allow-list proves the hello NAMES an
-        // authorized key; this proves the sender HOLDS it and bound this
-        // kem_ek to it. Without it an on-path attacker presents an authorized
-        // client's public keys with its own KEM key and obtains the server's
-        // session key, and any copy of the public keys can drain QKD material.
-        if !client_hello.verify_hello_sig()? {
-            audit::log_auth_failure(peer_addr, "ClientHelloV3.hello_sig invalid");
-            warn!(
-                "Rejected client {}: hello signature does not verify under its falcon_vk",
-                peer_addr
-            );
-            return Err(anyhow!("ClientHello signature invalid"));
+        // ── Admission: possession (B6), freshness and first sight (B8) ──────
+        // After the allow-list, before any QKD allocation or encapsulation.
+        // The allow-list proves the hello NAMES an authorized key; the
+        // signature proves the sender HOLDS it and bound this kem_ek to it
+        // (Verifpal F1); the signed timestamp plus the replay guard make a
+        // recorded hello worthless, so a copy of one cannot drain QKD keys.
+        if let Err(e) = admit_hello_v3(
+            &client_hello,
+            unix_now(),
+            self.config.proxy.hello_max_skew_secs,
+            &self.replay_guard,
+            Instant::now(),
+        ) {
+            audit::log_auth_failure(peer_addr, &e.to_string());
+            warn!("Rejected client {}: {}", peer_addr, e);
+            return Err(anyhow!("ClientHello refused: {e}"));
         }
 
         // ── QKD negotiation (spec §5) — after authorization, before transcript
@@ -863,10 +934,16 @@ mod tests {
             requested_key_size: 32,
             client_sae_id: "sae-102".to_string(),
             qkd_capable: true,
+            timestamp: unix_now(),
             hello_sig: Vec::new(),
         };
         hello.sign(client_id).expect("sign hello");
         hello
+    }
+
+    /// A small guard with a 240 s window (2 × the 120 s default skew).
+    fn guard(max_entries: usize) -> Mutex<ReplayGuard> {
+        Mutex::new(ReplayGuard::new(Duration::from_secs(240), max_entries))
     }
 
     /// Client-side v3 transcript reconstruction from wire data — what a real
@@ -1098,6 +1175,7 @@ mod tests {
 
         let mutations: Vec<(&str, Box<dyn Fn(&mut ClientHelloV3)>)> = vec![
             ("client_random", Box::new(|h| h.client_random[0] ^= 1)),
+            ("timestamp", Box::new(|h| h.timestamp += 1)),
             ("kem_ek", Box::new(|h| h.kem_ek[0] ^= 1)),
             ("slh_dsa_vk", Box::new(|h| h.slh_dsa_vk[0] ^= 1)),
             ("requested_key_size", Box::new(|h| h.requested_key_size += 1)),
@@ -1112,6 +1190,94 @@ mod tests {
                 "{field} must be covered by hello_sig"
             );
         }
+    }
+
+    // ── freshness and replay (backlog B8) ────────────────────────────────────
+
+    /// The replay Verifpal reported: the same honest hello presented twice.
+    /// First sight is admitted, the second is refused inside the window, and
+    /// once the window has passed the timestamp check refuses it even though
+    /// the guard has forgotten it.
+    #[test]
+    fn v3_replayed_hello_is_refused_inside_and_beyond_the_window() {
+        let client_kem = EphemeralKemKey::new().unwrap();
+        let client_id = PqKeyExchange::new().unwrap();
+        let hello = v3_hello(&client_kem, &client_id);
+        let g = guard(16);
+        let t0 = Instant::now();
+
+        admit_hello_v3(&hello, hello.timestamp, 120, &g, t0).expect("first sight is admitted");
+        let err = admit_hello_v3(&hello, hello.timestamp, 120, &g, t0).unwrap_err();
+        assert!(err.to_string().contains("replayed"), "got: {err}");
+        let err = admit_hello_v3(
+            &hello,
+            hello.timestamp + 60,
+            120,
+            &g,
+            t0 + Duration::from_secs(60),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("replayed"), "still inside the window: {err}");
+
+        // Beyond the window the guard has forgotten it; the timestamp check
+        // is what keeps the recording worthless.
+        let err = admit_hello_v3(
+            &hello,
+            hello.timestamp + 121,
+            120,
+            &g,
+            t0 + Duration::from_secs(300),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("timestamp"), "got: {err}");
+    }
+
+    #[test]
+    fn v3_stale_or_future_dated_hello_is_refused_before_the_guard() {
+        let client_kem = EphemeralKemKey::new().unwrap();
+        let client_id = PqKeyExchange::new().unwrap();
+        let hello = v3_hello(&client_kem, &client_id);
+        let g = guard(16);
+        let t0 = Instant::now();
+
+        for server_clock in [hello.timestamp - 121, hello.timestamp + 121] {
+            let err = admit_hello_v3(&hello, server_clock, 120, &g, t0).unwrap_err();
+            assert!(err.to_string().contains("timestamp"), "got: {err}");
+        }
+        assert!(g.lock().unwrap().is_empty(), "a refused hello must not occupy a slot");
+        // Exactly at the skew boundary is still acceptable.
+        admit_hello_v3(&hello, hello.timestamp + 120, 120, &g, t0).expect("boundary");
+    }
+
+    #[test]
+    fn v3_invalid_signature_is_refused_before_the_timestamp_and_the_guard() {
+        let client_kem = EphemeralKemKey::new().unwrap();
+        let client_id = PqKeyExchange::new().unwrap();
+        let mut hello = v3_hello(&client_kem, &client_id);
+        hello.hello_sig.clear();
+        let g = guard(16);
+        let err = admit_hello_v3(&hello, hello.timestamp, 120, &g, Instant::now()).unwrap_err();
+        assert!(err.to_string().contains("signature"), "got: {err}");
+        assert!(g.lock().unwrap().is_empty(), "unauthenticated hellos never reach the cache");
+    }
+
+    #[test]
+    fn v3_replay_cache_full_fails_closed() {
+        let client_id = PqKeyExchange::new().unwrap();
+        let g = guard(2);
+        let t0 = Instant::now();
+        let mut hellos = Vec::new();
+        for _ in 0..3 {
+            let kem = EphemeralKemKey::new().unwrap();
+            hellos.push(v3_hello(&kem, &client_id));
+        }
+        admit_hello_v3(&hellos[0], hellos[0].timestamp, 120, &g, t0).expect("1");
+        admit_hello_v3(&hellos[1], hellos[1].timestamp, 120, &g, t0).expect("2");
+        let err = admit_hello_v3(&hellos[2], hellos[2].timestamp, 120, &g, t0).unwrap_err();
+        assert!(err.to_string().contains("cache full"), "got: {err}");
+        // A replay of an admitted hello is still named as a replay, not as Full.
+        let err = admit_hello_v3(&hellos[0], hellos[0].timestamp, 120, &g, t0).unwrap_err();
+        assert!(err.to_string().contains("replayed"), "got: {err}");
     }
 
     /// The signed hello still round-trips the wire and keeps the version

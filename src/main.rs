@@ -13,6 +13,7 @@ mod config;
 mod crypto;
 mod proxy;
 mod qkd_client;
+mod replay;
 
 use config::Config;
 use proxy::ProxyServer;

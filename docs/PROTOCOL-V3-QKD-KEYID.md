@@ -84,12 +84,17 @@ link; it negotiates **PQC-only** (§5).
 +    /// True iff the client can run ETSI 014 `dec_keys` against a KME that
 +    /// shares keys with the server's KME. Drives QKD-vs-PQC negotiation.
 +    pub qkd_capable: bool,
++    /// Client clock, seconds since the Unix epoch, under the signature. The
++    /// server refuses a hello more than proxy.hello_max_skew_secs (default
++    /// 120) from its own clock, in either direction (2026-09-12, B8).
++    pub timestamp: u64,
 +    /// Falcon-512 signature by the client's identity key (the one falcon_vk
-+    /// names) over SHA3-256("pqtg-client-hello-v3" ‖ client_random ‖ len‖kem_ek
-+    /// ‖ len‖falcon_vk ‖ len‖slh_dsa_vk ‖ requested_key_size_be_u64
-+    /// ‖ len‖client_sae_id ‖ qkd_capable_byte). Proof of possession of the
-+    /// allow-listed key, and binds THIS kem_ek to it (2026-09-12, closes
-+    /// Verifpal finding F1; formal/CLIENTAUTH-RESULTS-2026-09-12.md).
++    /// names) over SHA3-256("pqtg-client-hello-v3" ‖ client_random
++    /// ‖ timestamp_be_u64 ‖ len‖kem_ek ‖ len‖falcon_vk ‖ len‖slh_dsa_vk
++    /// ‖ requested_key_size_be_u64 ‖ len‖client_sae_id ‖ qkd_capable_byte).
++    /// Proof of possession of the allow-listed key, and binds THIS kem_ek to
++    /// it (2026-09-12, closes Verifpal finding F1;
++    /// formal/CLIENTAUTH-RESULTS-2026-09-12.md).
 +    pub hello_sig: Vec<u8>,
  }
 
@@ -223,13 +228,22 @@ PqcOnly is identical minus the `enc_keys`/`dec_keys` calls and with
   and, in PqcOnly, obtains the server's session key (Verifpal F1). The
   authenticated model passes both hybrid directions
   (`formal/CLIENTAUTH-RESULTS-2026-09-12.md`).
-- **Hello replay (open, B8).** The hello is one-shot: the server contributes
-  no nonce before accepting it, so a recorded honest hello is accepted again.
-  No secrecy impact (only the honest client can decapsulate), but each replay
-  costs the server one `enc_keys` allocation and one encapsulation. Closing it
-  needs recipient-generated context (a server nonce in a first flight, or a
-  bounded `(falcon_vk, client_random)` replay cache within the handshake
-  window).
+- **Hello replay (B8, mitigated 2026-09-12).** The hello is one-shot: the
+  server contributes no nonce before accepting it, so on the wire a recorded
+  honest hello verifies again. No secrecy impact (only the honest client can
+  decapsulate), but each replay would cost the server one `enc_keys`
+  allocation and one encapsulation. Two server-side checks, run after the
+  signature and before any spend: (1) the signed `timestamp` must be within
+  `proxy.hello_max_skew_secs` (default 120 s) of the server clock, so a
+  recording is worthless after the window; (2) inside the window a bounded
+  replay guard (`src/replay.rs`, `proxy.hello_replay_cache_entries`, default
+  131072, window = 2 × skew) refuses a `client_random` it has already
+  admitted. Only signature-valid, in-window hellos are inserted, so the cache
+  cannot be filled without an authorized private key; when full it fails
+  closed. Residual: a clock skew larger than the window between an honest
+  client and the server refuses that client (a configuration matter, logged).
+  This is a stateful mitigation; the symbolic model cannot express it, so the
+  Verifpal injectivity query on `hello_sig` stays FAIL by construction.
 
 ---
 

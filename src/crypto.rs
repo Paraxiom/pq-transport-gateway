@@ -373,8 +373,9 @@ pub fn transcript_hash_v3(
 
 /// v3 ClientHello digest, signed by the client's Falcon-512 identity key as
 /// `ClientHelloV3.hello_sig`. Covers every hello field except the signature
-/// itself, variable-length fields length-prefixed, under its own label so it
-/// can never collide with a transcript.
+/// itself (including the freshness `timestamp`, backlog B8), variable-length
+/// fields length-prefixed, under its own label so it can never collide with a
+/// transcript.
 ///
 /// Why it exists: the allow-list only proves a hello NAMES an authorized key.
 /// Without a signature, an on-path attacker presents an authorized client's
@@ -387,6 +388,7 @@ pub fn transcript_hash_v3(
 #[allow(clippy::too_many_arguments)]
 pub fn client_hello_digest_v3(
     client_random: &[u8; 32],
+    timestamp: u64,
     kem_ek: &[u8],
     falcon_vk: &[u8],
     slh_dsa_vk: &[u8],
@@ -397,6 +399,7 @@ pub fn client_hello_digest_v3(
     let mut h = Sha3_256::new();
     h.update(CLIENT_HELLO_LABEL_V3);
     h.update(client_random);
+    h.update(timestamp.to_be_bytes());
     h.update((kem_ek.len() as u32).to_be_bytes());
     h.update(kem_ek);
     h.update((falcon_vk.len() as u32).to_be_bytes());

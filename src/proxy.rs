@@ -14,9 +14,9 @@ use crate::{
     auth::Authenticator,
     config::Config,
     crypto::{
-        derive_session_key, encapsulate_to, mix_keys, random_bytes, transcript_hash, PqKeyExchange,
-        PqSession, FALCON_512_VK_LEN, MIN_SESSION_FRAME_BYTES, ML_KEM_768_EK_LEN,
-        SLH_DSA_SHAKE128F_VK_LEN,
+        derive_session_key, derive_session_key_v3, encapsulate_to, mix_keys, mix_keys_v3,
+        random_bytes, transcript_hash, transcript_hash_v3, PqKeyExchange, PqSession,
+        FALCON_512_VK_LEN, MIN_SESSION_FRAME_BYTES, ML_KEM_768_EK_LEN, SLH_DSA_SHAKE128F_VK_LEN,
     },
     qkd_client::QkdClient,
 };
@@ -27,6 +27,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, error, info, warn};
+use zeroize::Zeroizing;
 
 #[derive(Clone)]
 pub struct ProxyServer {
@@ -61,6 +62,78 @@ pub struct ServerHello {
     pub transcript_sig: Vec<u8>,
 }
 
+// ── Wire protocol v3 (PROTOCOL-V3-QKD-KEYID.md) ─────────────────────────────
+//
+// v3 transports the ETSI 014 `key_ID` (a non-secret UUID) inside the signed
+// ServerHello so a peer-SAE client can run `dec_keys` at its own KME and
+// reproduce the QKD contribution — making hybrid mode interoperable — while
+// binding key_ID / key_mode / master SAE-ID / key length under the Falcon-512
+// transcript signature (no MITM key-id substitution, no silent downgrade).
+// See docs/audit-vs-eprint-2025-1671.md for the attack model this closes.
+
+/// Negotiated key mode, set authoritatively by the server and signed (§5).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum KeyMode {
+    Hybrid,
+    PqcOnly,
+}
+
+impl KeyMode {
+    /// Byte committed into the v3 transcript (spec §4): 0x01 Hybrid, 0x00 PqcOnly.
+    pub fn wire_byte(self) -> u8 {
+        match self {
+            KeyMode::Hybrid => 0x01,
+            KeyMode::PqcOnly => 0x00,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ClientHelloV3 {
+    pub version: String,
+    pub client_random: [u8; 32],
+    pub kem_ek: Vec<u8>,
+    pub falcon_vk: Vec<u8>,
+    pub slh_dsa_vk: Vec<u8>,
+    pub requested_key_size: usize,
+    /// ETSI SAE-ID this client is registered as at its KME. Empty ⇒ no KME,
+    /// request PQC-only. The server allocates the QKD key for this slave SAE.
+    pub client_sae_id: String,
+    /// True iff the client can run ETSI 014 `dec_keys` against a KME that
+    /// shares keys with the server's KME. Drives QKD-vs-PQC negotiation.
+    pub qkd_capable: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ServerHelloV3 {
+    pub version: String,
+    pub server_random: [u8; 32],
+    pub falcon_vk: Vec<u8>,
+    pub slh_dsa_vk: Vec<u8>,
+    pub kem_ciphertext: Vec<u8>,
+    /// Falcon-512 signature over the v3 transcript — which includes key_mode,
+    /// qkd_key_id, master_sae_id and qkd_key_len (tamper-evident negotiation).
+    pub transcript_sig: Vec<u8>,
+    /// Negotiated key mode the server actually used (authoritative).
+    pub key_mode: KeyMode,
+    /// Present iff `key_mode == Hybrid`: the ETSI 014 key_ID (UUID) the client
+    /// must fetch via `dec_keys` to reproduce the QKD contribution.
+    pub qkd_key_id: Option<String>,
+    /// Master SAE-ID for the client's `dec_keys` call (= this gateway's SAE).
+    pub master_sae_id: String,
+    /// Bytes of QKD material mixed (0 in PqcOnly) — transcript-bound.
+    pub qkd_key_len: u32,
+}
+
+/// Minimal prefix decode to pick the struct shape before full deserialization.
+/// bincode is not self-describing, but it encodes the leading `version:
+/// String` first in both v2 and v3 hellos, so a peek at that one field is
+/// reliable (spec §8).
+#[derive(Deserialize)]
+struct VersionPeek {
+    version: String,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct KeyRequest {
     pub key_id: String,
@@ -84,8 +157,12 @@ pub struct KeyMetadata {
 }
 
 const PROTOCOL_VERSION: &str = "2.0";
+const PROTOCOL_VERSION_V3: &str = "3.0";
 const MAX_HELLO_BYTES: usize = 16 * 1024;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+/// Sanity cap on the client-supplied SAE-ID (ETSI 014 SAE_IDs are short
+/// logical labels; anything longer is malformed or hostile).
+const MAX_SAE_ID_BYTES: usize = 256;
 
 // ── Type-state server handshake ─────────────────────────────────────────────
 //
@@ -202,6 +279,110 @@ impl Default for ServerHandshake<AwaitingHello> {
     }
 }
 
+// ── v3 type-state ────────────────────────────────────────────────────────────
+//
+// The v3 ordering difference vs v2 is load-bearing: the QKD key is allocated
+// BEFORE the transcript is built, so its key_ID (and the negotiated mode) sit
+// under the Falcon-512 signature. In v2 the key was fetched after ServerHello
+// was already on the wire — which is exactly why its key_ID could never be
+// transcript-bound, and why v2 hybrid mode could not interoperate.
+
+/// Reached after a v3 client hello has been accepted and QKD negotiation has
+/// resolved: the signed `ServerHelloV3` is ready and the secrets are committed.
+pub struct HelloAcceptedV3 {
+    server_hello: ServerHelloV3,
+    pqc_secret: [u8; 32],
+    transcript: [u8; 32],
+    client_falcon_vk: Vec<u8>,
+    qkd_material: Option<Zeroizing<Vec<u8>>>,
+}
+
+impl ServerHandshake<AwaitingHello> {
+    /// v3 responder. `qkd` is the outcome of negotiation: `Some((key_ID,
+    /// material))` for Hybrid (already allocated for the client's slave SAE
+    /// via `enc_keys`), `None` for PqcOnly. The key mode, key_ID, master
+    /// SAE-ID and key length are all committed into the transcript and
+    /// therefore signed — tamper-evident negotiation, no silent downgrade.
+    pub fn respond_v3(
+        self,
+        client_hello: &ClientHelloV3,
+        host_key: &PqKeyExchange,
+        qkd: Option<(String, Zeroizing<Vec<u8>>)>,
+        master_sae_id: &str,
+    ) -> Result<ServerHandshake<HelloAcceptedV3>> {
+        let (kem_ciphertext, pqc_secret) = encapsulate_to(&client_hello.kem_ek)?;
+        let server_random = random_bytes::<32>();
+        let (key_mode, qkd_key_id, qkd_key_len, qkd_material) = match qkd {
+            Some((kid, material)) => {
+                let len = u32::try_from(material.len())
+                    .map_err(|_| anyhow!("QKD key too large for u32 length"))?;
+                (KeyMode::Hybrid, Some(kid), len, Some(material))
+            }
+            None => (KeyMode::PqcOnly, None, 0u32, None),
+        };
+        let transcript = transcript_hash_v3(
+            &client_hello.client_random,
+            &server_random,
+            &client_hello.kem_ek,
+            host_key.falcon_pk_bytes(),
+            &kem_ciphertext,
+            key_mode.wire_byte(),
+            qkd_key_id.as_deref().unwrap_or("").as_bytes(),
+            master_sae_id.as_bytes(),
+            qkd_key_len,
+        );
+        let transcript_sig = host_key.sign_transcript(&transcript)?;
+        let server_hello = ServerHelloV3 {
+            version: PROTOCOL_VERSION_V3.to_string(),
+            server_random,
+            falcon_vk: host_key.falcon_pk_bytes().to_vec(),
+            slh_dsa_vk: host_key.slh_dsa_pk_bytes().to_vec(),
+            kem_ciphertext,
+            transcript_sig,
+            key_mode,
+            qkd_key_id,
+            master_sae_id: master_sae_id.to_string(),
+            qkd_key_len,
+        };
+        Ok(ServerHandshake {
+            state: HelloAcceptedV3 {
+                server_hello,
+                pqc_secret,
+                transcript,
+                client_falcon_vk: client_hello.falcon_vk.clone(),
+                qkd_material,
+            },
+        })
+    }
+}
+
+impl ServerHandshake<HelloAcceptedV3> {
+    /// The signed `ServerHelloV3` to write to the wire.
+    pub fn server_hello(&self) -> &ServerHelloV3 {
+        &self.state.server_hello
+    }
+
+    /// Derive the v3 session. Hybrid: `mix_keys_v3(qkd, pqc, transcript)` —
+    /// the combiner's context input is the v3 transcript, which commits the
+    /// key_ID, mode, SAE-ID and length (CatKDF-style context binding; see
+    /// docs/audit-vs-eprint-2025-1671.md). PqcOnly: the KEM secret directly.
+    /// Consumes `self`; the only constructor of a live v3 session.
+    pub fn into_session(self) -> Result<(PqSession, Vec<u8>)> {
+        let s = self.state;
+        let secret = match &s.qkd_material {
+            Some(m) => mix_keys_v3(m, &s.pqc_secret, &s.transcript),
+            None => s.pqc_secret,
+        };
+        let session_key = derive_session_key_v3(&secret, &s.transcript);
+        let session = PqSession::new(
+            &session_key,
+            random_bytes::<32>(),
+            s.client_falcon_vk.clone(),
+        )?;
+        Ok((session, s.client_falcon_vk))
+    }
+}
+
 impl ProxyServer {
     pub async fn new(config: Arc<Config>) -> Result<Self> {
         let qkd_client = QkdClient::new(&config)?;
@@ -275,81 +456,165 @@ impl ProxyServer {
         stream: &mut TcpStream,
         peer_addr: &SocketAddr,
     ) -> Result<(PqSession, Vec<u8>)> {
-        // ── ClientHello ─────────────────────────────────────────────────────
-        let client_hello: ClientHello = read_framed(stream, MAX_HELLO_BYTES).await?;
-        if !client_hello.version.starts_with("2.") {
-            return Err(anyhow!(
-                "Unsupported protocol version: {}",
-                client_hello.version
-            ));
+        // Read the hello frame ONCE as raw bytes. bincode is not
+        // self-describing, so peek the leading `version` string to pick the
+        // struct shape (PROTOCOL-V3-QKD-KEYID.md §8), then branch on major.
+        let hello_bytes = read_frame_bytes(stream, MAX_HELLO_BYTES).await?;
+        let peek: VersionPeek = bincode::deserialize(&hello_bytes)
+            .map_err(|_| anyhow!("Malformed hello: cannot read protocol version"))?;
+        if peek.version.starts_with("3.") {
+            self.handshake_v3(stream, peer_addr, &hello_bytes).await
+        } else if peek.version.starts_with("2.") {
+            self.handshake_v2(stream, peer_addr, &hello_bytes).await
+        } else {
+            Err(anyhow!("Unsupported protocol version: {}", peek.version))
         }
+    }
 
-        // ── Validate ClientHello field lengths (issue #5) ───────────────────
-        if client_hello.kem_ek.len() != ML_KEM_768_EK_LEN {
+    /// Shared ClientHello validation (issue #5) + authorization (issue #1).
+    /// Authorization is fail-closed and runs before any encapsulation so an
+    /// unauthorized peer cannot exhaust crypto budget — or, in v3, consume
+    /// KMS keys (spec §7, DoS note).
+    fn validate_and_authorize(
+        &self,
+        kem_ek: &[u8],
+        falcon_vk: &[u8],
+        slh_dsa_vk: &[u8],
+        peer_addr: &SocketAddr,
+    ) -> Result<()> {
+        if kem_ek.len() != ML_KEM_768_EK_LEN {
             return Err(anyhow!(
                 "ClientHello.kem_ek wrong size: expected {} bytes, got {}",
                 ML_KEM_768_EK_LEN,
-                client_hello.kem_ek.len()
+                kem_ek.len()
             ));
         }
-        if client_hello.falcon_vk.len() != FALCON_512_VK_LEN {
+        if falcon_vk.len() != FALCON_512_VK_LEN {
             return Err(anyhow!(
                 "ClientHello.falcon_vk wrong size: expected {} bytes, got {}",
                 FALCON_512_VK_LEN,
-                client_hello.falcon_vk.len()
+                falcon_vk.len()
             ));
         }
-        if client_hello.slh_dsa_vk.len() != SLH_DSA_SHAKE128F_VK_LEN {
+        if slh_dsa_vk.len() != SLH_DSA_SHAKE128F_VK_LEN {
             return Err(anyhow!(
                 "ClientHello.slh_dsa_vk wrong size: expected {} bytes, got {}",
                 SLH_DSA_SHAKE128F_VK_LEN,
-                client_hello.slh_dsa_vk.len()
+                slh_dsa_vk.len()
             ));
         }
-
-        // ── Authorize the client (issue #1) ─────────────────────────────────
-        // Falcon-512 vk + SLH-DSA-Shake128f vk pair must appear in
-        // `authorized_keys`. Empty file ⇒ no one is authorized
-        // (fail-closed). Done before any keypair generation / encapsulation
-        // so an unauthorized peer doesn't get to exhaust crypto budget.
-        match self
-            .authenticator
-            .verify_client(&client_hello.falcon_vk, &client_hello.slh_dsa_vk)
-        {
+        match self.authenticator.verify_client(falcon_vk, slh_dsa_vk) {
             Ok(auth_key) => {
                 debug!(
                     "Client authorized: key_id={} peer={}",
                     auth_key.key_id, peer_addr
                 );
+                Ok(())
             }
             Err(e) => {
                 audit::log_auth_failure(peer_addr, &e.to_string());
                 warn!("Rejected unauthorized client {}: {}", peer_addr, e);
-                return Err(anyhow!("Client not in authorized_keys"));
+                Err(anyhow!("Client not in authorized_keys"))
             }
         }
+    }
 
-        // ── Type-state handshake: encapsulate, build + sign transcript ──────
+    /// Legacy v2 flow. QKD mixing is intentionally NOT performed for v2
+    /// clients: v2 cannot transport the key_ID, so a mixed session could
+    /// never be reproduced by an external client (the v2 interop hole,
+    /// PROTOCOL-V3-QKD-KEYID.md §1). v2 is therefore PQC-only — honestly —
+    /// and hybrid requires wire v3.
+    async fn handshake_v2(
+        &self,
+        stream: &mut TcpStream,
+        peer_addr: &SocketAddr,
+        hello_bytes: &[u8],
+    ) -> Result<(PqSession, Vec<u8>)> {
+        let client_hello: ClientHello = bincode::deserialize(hello_bytes)?;
+        self.validate_and_authorize(
+            &client_hello.kem_ek,
+            &client_hello.falcon_vk,
+            &client_hello.slh_dsa_vk,
+            peer_addr,
+        )?;
         let handshake = ServerHandshake::new().respond(&client_hello, &self.host_key)?;
         write_framed(stream, handshake.server_hello()).await?;
+        debug!(
+            "v2 client {}: PQC-only session (hybrid requires wire protocol v3)",
+            peer_addr
+        );
+        handshake.into_session(None)
+    }
 
-        // ── Optional one-time QKD mixing ────────────────────────────────────
-        let qkd_material = match self.qkd_client.get_key(32).await {
-            Ok(qkd_key) => {
-                audit::log_qkd_key_used(peer_addr, qkd_key.key_id());
-                // Consume the key: QKD material is one-time, used exactly once.
-                Some(qkd_key.into_material())
+    /// v3 flow (PROTOCOL-V3-QKD-KEYID.md §5-§6): negotiate the key mode and
+    /// allocate the QKD key BEFORE building the transcript, so the key_ID and
+    /// mode are signed. Failure to allocate ⇒ PqcOnly, signaled and signed —
+    /// the client's local policy decides whether to accept the downgrade.
+    async fn handshake_v3(
+        &self,
+        stream: &mut TcpStream,
+        peer_addr: &SocketAddr,
+        hello_bytes: &[u8],
+    ) -> Result<(PqSession, Vec<u8>)> {
+        let client_hello: ClientHelloV3 = bincode::deserialize(hello_bytes)?;
+        if client_hello.client_sae_id.len() > MAX_SAE_ID_BYTES {
+            return Err(anyhow!(
+                "ClientHello.client_sae_id too long: {} bytes (max {})",
+                client_hello.client_sae_id.len(),
+                MAX_SAE_ID_BYTES
+            ));
+        }
+        self.validate_and_authorize(
+            &client_hello.kem_ek,
+            &client_hello.falcon_vk,
+            &client_hello.slh_dsa_vk,
+            peer_addr,
+        )?;
+
+        // ── QKD negotiation (spec §5) — after authorization, before transcript
+        let want_qkd = client_hello.qkd_capable && !client_hello.client_sae_id.is_empty();
+        let qkd = if want_qkd {
+            match self
+                .qkd_client
+                .get_key_for_sae(&client_hello.client_sae_id, 32)
+                .await
+            {
+                Ok(key) => {
+                    audit::log_qkd_key_used(peer_addr, key.key_id());
+                    let kid = key.key_id().to_string();
+                    // Consume the key: QKD material is one-time, used exactly once.
+                    Some((kid, key.into_material()))
+                }
+                Err(e) => {
+                    warn!(
+                        "QKD unavailable for slave SAE {:?} ({e}); negotiating PqcOnly",
+                        client_hello.client_sae_id
+                    );
+                    None
+                }
             }
-            Err(_) => {
-                warn!("QKD not available, using PQC-only mode");
-                None
-            }
+        } else {
+            None
         };
 
-        // `into_session` is the ONLY way to obtain a live `PqSession`, so no
-        // data can flow before the handshake has completed in order.
-        let qkd_ref = qkd_material.as_ref().map(|m| m.as_slice());
-        handshake.into_session(qkd_ref)
+        // The gateway's own SAE identity, announced so the client can run
+        // `dec_keys(master_sae_id, [key_ID])` at its KME. Reuses the
+        // `qkd.default_master_sae_id` config value as this gateway's label.
+        let master_sae_id = self.config.qkd.default_master_sae_id.clone();
+
+        let handshake = ServerHandshake::new().respond_v3(
+            &client_hello,
+            &self.host_key,
+            qkd,
+            &master_sae_id,
+        )?;
+        write_framed(stream, handshake.server_hello()).await?;
+        info!(
+            "v3 session with {}: key_mode={:?}",
+            peer_addr,
+            handshake.server_hello().key_mode
+        );
+        handshake.into_session()
     }
 
     async fn handle_session(
@@ -417,10 +682,9 @@ impl ProxyServer {
     }
 }
 
-async fn read_framed<T: for<'de> Deserialize<'de>>(
-    stream: &mut TcpStream,
-    max: usize,
-) -> Result<T> {
+/// Read one length-prefixed frame as raw bytes (caller picks the struct
+/// shape — needed for the v2/v3 version peek).
+async fn read_frame_bytes(stream: &mut TcpStream, max: usize) -> Result<Vec<u8>> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;
@@ -429,6 +693,15 @@ async fn read_framed<T: for<'de> Deserialize<'de>>(
     }
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await?;
+    Ok(buf)
+}
+
+#[allow(dead_code)]
+async fn read_framed<T: for<'de> Deserialize<'de>>(
+    stream: &mut TcpStream,
+    max: usize,
+) -> Result<T> {
+    let buf = read_frame_bytes(stream, max).await?;
     Ok(bincode::deserialize(&buf)?)
 }
 
@@ -509,5 +782,197 @@ mod tests {
         let (ct, nonce) = server_session.encrypt(b"quantum-safe hello").unwrap();
         let pt = client_session.decrypt(&ct, &nonce).unwrap();
         assert_eq!(pt, b"quantum-safe hello");
+    }
+
+    // ── v3 (PROTOCOL-V3-QKD-KEYID.md) ────────────────────────────────────────
+
+    fn v3_hello(client_kem: &EphemeralKemKey, client_id: &PqKeyExchange) -> ClientHelloV3 {
+        ClientHelloV3 {
+            version: PROTOCOL_VERSION_V3.to_string(),
+            client_random: random_bytes::<32>(),
+            kem_ek: client_kem.ek_bytes.clone(),
+            falcon_vk: client_id.falcon_pk_bytes().to_vec(),
+            slh_dsa_vk: client_id.slh_dsa_pk_bytes().to_vec(),
+            requested_key_size: 32,
+            client_sae_id: "sae-102".to_string(),
+            qkd_capable: true,
+        }
+    }
+
+    /// Client-side v3 transcript reconstruction from wire data — what a real
+    /// external client computes from its own hello + the ServerHelloV3.
+    fn client_transcript_v3(hello: &ClientHelloV3, sh: &ServerHelloV3) -> [u8; 32] {
+        transcript_hash_v3(
+            &hello.client_random,
+            &sh.server_random,
+            &hello.kem_ek,
+            &sh.falcon_vk,
+            &sh.kem_ciphertext,
+            sh.key_mode.wire_byte(),
+            sh.qkd_key_id.as_deref().unwrap_or("").as_bytes(),
+            sh.master_sae_id.as_bytes(),
+            sh.qkd_key_len,
+        )
+    }
+
+    /// THE v3 fix, end to end: in Hybrid mode an external client — holding
+    /// only wire data plus the QKD bytes its own KME returns for the signed
+    /// key_ID — derives the SAME session key as the server. (This is exactly
+    /// what v2 could not do: its mixed sessions were server-only secrets.)
+    #[test]
+    fn v3_hybrid_handshake_interoperates_end_to_end() {
+        let host_key = PqKeyExchange::new().unwrap();
+        let client_kem = EphemeralKemKey::new().unwrap();
+        let client_id = PqKeyExchange::new().unwrap();
+        let hello = v3_hello(&client_kem, &client_id);
+
+        // The QKD key the server's KME allocated for slave SAE "sae-102";
+        // the client's KME will return the same bytes for this key_ID.
+        let qkd_bytes = vec![0x5Au8; 32];
+        let kid = "1e4d1e4d-aaaa-bbbb-cccc-0123456789ab".to_string();
+
+        let handshake = ServerHandshake::new()
+            .respond_v3(
+                &hello,
+                &host_key,
+                Some((kid.clone(), Zeroizing::new(qkd_bytes.clone()))),
+                "sae-101",
+            )
+            .unwrap();
+        let sh = handshake.server_hello().clone();
+        assert_eq!(sh.key_mode, KeyMode::Hybrid);
+        assert_eq!(sh.qkd_key_id.as_deref(), Some(kid.as_str()));
+        assert_eq!(sh.qkd_key_len, 32);
+        let (mut server_session, _) = handshake.into_session().unwrap();
+
+        // Client side: verify the signed transcript, then reproduce the key.
+        let transcript = client_transcript_v3(&hello, &sh);
+        assert!(
+            PqKeyExchange::verify_falcon(&transcript, &sh.transcript_sig, &sh.falcon_vk).unwrap(),
+            "v3 transcript signature must verify"
+        );
+        let client_ss = client_kem.decapsulate(&sh.kem_ciphertext).unwrap();
+        let secret = mix_keys_v3(&qkd_bytes, &client_ss, &transcript);
+        let client_key = derive_session_key_v3(&secret, &transcript);
+        let client_session =
+            PqSession::new(&client_key, random_bytes::<32>(), sh.falcon_vk.clone()).unwrap();
+
+        let (ct, nonce) = server_session.encrypt(b"hybrid interop at last").unwrap();
+        let pt = client_session.decrypt(&ct, &nonce).unwrap();
+        assert_eq!(pt, b"hybrid interop at last");
+    }
+
+    /// PqcOnly negotiation: no QKD → key_mode signed as PqcOnly, sessions agree.
+    #[test]
+    fn v3_pqconly_handshake_interoperates() {
+        let host_key = PqKeyExchange::new().unwrap();
+        let client_kem = EphemeralKemKey::new().unwrap();
+        let client_id = PqKeyExchange::new().unwrap();
+        let hello = v3_hello(&client_kem, &client_id);
+
+        let handshake = ServerHandshake::new()
+            .respond_v3(&hello, &host_key, None, "sae-101")
+            .unwrap();
+        let sh = handshake.server_hello().clone();
+        assert_eq!(sh.key_mode, KeyMode::PqcOnly);
+        assert!(sh.qkd_key_id.is_none());
+        assert_eq!(sh.qkd_key_len, 0);
+        let (mut server_session, _) = handshake.into_session().unwrap();
+
+        let transcript = client_transcript_v3(&hello, &sh);
+        assert!(
+            PqKeyExchange::verify_falcon(&transcript, &sh.transcript_sig, &sh.falcon_vk).unwrap()
+        );
+        let client_ss = client_kem.decapsulate(&sh.kem_ciphertext).unwrap();
+        let client_key = derive_session_key_v3(&client_ss, &transcript);
+        let client_session =
+            PqSession::new(&client_key, random_bytes::<32>(), sh.falcon_vk.clone()).unwrap();
+
+        let (ct, nonce) = server_session.encrypt(b"pqc-only ok").unwrap();
+        assert_eq!(client_session.decrypt(&ct, &nonce).unwrap(), b"pqc-only ok");
+    }
+
+    /// Downgrade attack: a MITM flips Hybrid→PqcOnly in flight. The client's
+    /// recomputed transcript no longer matches ⇒ signature verification FAILS.
+    #[test]
+    fn v3_downgrade_tampering_breaks_signature() {
+        let host_key = PqKeyExchange::new().unwrap();
+        let client_kem = EphemeralKemKey::new().unwrap();
+        let client_id = PqKeyExchange::new().unwrap();
+        let hello = v3_hello(&client_kem, &client_id);
+
+        let handshake = ServerHandshake::new()
+            .respond_v3(
+                &hello,
+                &host_key,
+                Some(("uuid-x".to_string(), Zeroizing::new(vec![0x5A; 32]))),
+                "sae-101",
+            )
+            .unwrap();
+        let mut sh = handshake.server_hello().clone();
+
+        // MITM strips the QKD parameters to force PQC-only.
+        sh.key_mode = KeyMode::PqcOnly;
+        sh.qkd_key_id = None;
+        sh.qkd_key_len = 0;
+
+        let tampered_transcript = client_transcript_v3(&hello, &sh);
+        assert!(
+            !PqKeyExchange::verify_falcon(&tampered_transcript, &sh.transcript_sig, &sh.falcon_vk)
+                .unwrap(),
+            "downgrade tampering MUST break the transcript signature"
+        );
+    }
+
+    /// Key-ID substitution: a MITM swaps in a key_ID it can fetch ⇒ FAILS.
+    #[test]
+    fn v3_key_id_substitution_breaks_signature() {
+        let host_key = PqKeyExchange::new().unwrap();
+        let client_kem = EphemeralKemKey::new().unwrap();
+        let client_id = PqKeyExchange::new().unwrap();
+        let hello = v3_hello(&client_kem, &client_id);
+
+        let handshake = ServerHandshake::new()
+            .respond_v3(
+                &hello,
+                &host_key,
+                Some(("uuid-legit".to_string(), Zeroizing::new(vec![0x5A; 32]))),
+                "sae-101",
+            )
+            .unwrap();
+        let mut sh = handshake.server_hello().clone();
+        sh.qkd_key_id = Some("uuid-attacker".to_string());
+
+        let tampered_transcript = client_transcript_v3(&hello, &sh);
+        assert!(
+            !PqKeyExchange::verify_falcon(&tampered_transcript, &sh.transcript_sig, &sh.falcon_vk)
+                .unwrap(),
+            "key_ID substitution MUST break the transcript signature"
+        );
+    }
+
+    /// The version peek picks the right struct shape for both wire versions.
+    #[test]
+    fn version_peek_distinguishes_v2_and_v3() {
+        let client_kem = EphemeralKemKey::new().unwrap();
+        let client_id = PqKeyExchange::new().unwrap();
+
+        let v2 = ClientHello {
+            version: PROTOCOL_VERSION.to_string(),
+            client_random: random_bytes::<32>(),
+            kem_ek: client_kem.ek_bytes.clone(),
+            falcon_vk: client_id.falcon_pk_bytes().to_vec(),
+            slh_dsa_vk: client_id.slh_dsa_pk_bytes().to_vec(),
+            requested_key_size: 32,
+        };
+        let v3 = v3_hello(&client_kem, &client_id);
+
+        let v2_bytes = bincode::serialize(&v2).unwrap();
+        let v3_bytes = bincode::serialize(&v3).unwrap();
+
+        let p2: VersionPeek = bincode::deserialize(&v2_bytes).unwrap();
+        let p3: VersionPeek = bincode::deserialize(&v3_bytes).unwrap();
+        assert!(p2.version.starts_with("2."));
+        assert!(p3.version.starts_with("3."));
     }
 }

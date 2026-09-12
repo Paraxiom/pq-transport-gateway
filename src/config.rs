@@ -68,13 +68,15 @@ pub struct QkdConfig {
     #[serde(default = "default_master_sae_id")]
     pub default_master_sae_id: String,
 
-    /// If `true`, validate the vendor's TLS certificate against the
+    /// If `true` (default), validate the vendor's TLS certificate against the
     /// configured `vendor_cert` (and the system trust store if applicable).
-    /// If `false` (default), accept self-signed certs — appropriate for
-    /// most localhost vendor KMEs that ship with self-signed bundles, but
-    /// **not** suitable for production deployments that issue proper certs
-    /// to their KME or use mTLS internally. Closes issue #4.
-    #[serde(default)]
+    /// Set `false` ONLY for bench/dev KMEs that ship self-signed certs
+    /// without providing the cert bundle — and prefer providing the bundle
+    /// via `vendor_cert` instead. Default flipped to `true` 2026-08-18
+    /// (audit-vs-eprint-2025-1671.md fix #4): a gateway whose thesis is
+    /// "the 014 link's classical TLS is the seam" must not skip cert
+    /// validation on that very link by default.
+    #[serde(default = "default_tls_verify")]
     pub tls_verify: bool,
 }
 
@@ -446,7 +448,7 @@ impl Default for Config {
                 max_key_size: default_max_key_size(),
                 default_slave_sae_id: default_slave_sae_id(),
                 default_master_sae_id: default_master_sae_id(),
-                tls_verify: false,
+                tls_verify: default_tls_verify(),
             },
             relay: RelayConfig::default(),
             security: SecurityConfig {
@@ -493,6 +495,9 @@ fn default_max_key_size() -> usize {
 } // 1MB
 fn default_slave_sae_id() -> String {
     "default-slave".to_string()
+}
+fn default_tls_verify() -> bool {
+    true
 }
 fn default_master_sae_id() -> String {
     "default-master".to_string()

@@ -34,6 +34,14 @@ const HASH_ALG: SignAlgorithm = SignAlgorithm::SlhDsaShake128f;
 const SESSION_KDF_LABEL: &[u8] = b"pqtg-session-v2";
 const KEY_MIXING_LABEL: &[u8] = b"pqtg-key-mixing-v2";
 
+// v3 labels (PROTOCOL-V3-QKD-KEYID.md §4). v3 binds the ETSI 014 `key_ID`,
+// negotiated key mode, master SAE-ID and QKD key length under the Falcon-512
+// transcript signature, closing the unbound-key-ID gap analyzed in
+// docs/audit-vs-eprint-2025-1671.md (Hövelmanns et al., dependent-key attacks).
+const SESSION_KDF_LABEL_V3: &[u8] = b"pqtg-session-v3";
+const KEY_MIXING_LABEL_V3: &[u8] = b"pqtg-key-mixing-v3";
+const TRANSCRIPT_LABEL_V3: &[u8] = b"pqtg-transcript-v3";
+
 // ── Algorithm-specific byte lengths (FIPS 203/205, Falcon submission) ────────
 //
 // Single source of truth used by both runtime length checks and the Lean
@@ -313,6 +321,87 @@ pub fn mix_keys(qkd_key: &[u8], pqc_key: &[u8; 32]) -> [u8; 32] {
     h.update((qkd_key.len() as u32).to_be_bytes());
     h.update(qkd_key);
     h.update(pqc_key);
+    let digest = h.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
+/// v3 transcript hash (PROTOCOL-V3-QKD-KEYID.md §4).
+///
+/// Extends the v2 transcript with the negotiated QKD parameters so they sit
+/// under the server's Falcon-512 signature: a MITM can neither substitute a
+/// `key_ID` it can fetch, nor strip QKD mixing to force a silent downgrade,
+/// without breaking the signature. In PqcOnly mode pass `key_mode_byte = 0x00`,
+/// empty `qkd_key_id`/`master_sae_id` and `qkd_key_len = 0` — the fields are
+/// still hashed (length-prefixed), so mode is always transcript-committed.
+#[allow(clippy::too_many_arguments)]
+pub fn transcript_hash_v3(
+    client_random: &[u8; 32],
+    server_random: &[u8; 32],
+    client_kem_ek: &[u8],
+    server_falcon_pk: &[u8],
+    kem_ciphertext: &[u8],
+    key_mode_byte: u8,
+    qkd_key_id: &[u8],
+    master_sae_id: &[u8],
+    qkd_key_len: u32,
+) -> [u8; 32] {
+    let mut h = Sha3_256::new();
+    h.update(TRANSCRIPT_LABEL_V3);
+    h.update(client_random);
+    h.update(server_random);
+    h.update((client_kem_ek.len() as u32).to_be_bytes());
+    h.update(client_kem_ek);
+    h.update((server_falcon_pk.len() as u32).to_be_bytes());
+    h.update(server_falcon_pk);
+    h.update((kem_ciphertext.len() as u32).to_be_bytes());
+    h.update(kem_ciphertext);
+    h.update([key_mode_byte]);
+    h.update((qkd_key_id.len() as u32).to_be_bytes());
+    h.update(qkd_key_id);
+    h.update((master_sae_id.len() as u32).to_be_bytes());
+    h.update(master_sae_id);
+    h.update(qkd_key_len.to_be_bytes());
+    let digest = h.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
+/// v3 session-key derivation — identical shape to v2 under the v3 label, so
+/// v2 and v3 sessions can never collide even on identical inputs.
+pub fn derive_session_key_v3(secret: &[u8; 32], transcript: &[u8; 32]) -> [u8; 32] {
+    let mut h = Sha3_256::new();
+    h.update(SESSION_KDF_LABEL_V3);
+    h.update(secret);
+    h.update(transcript);
+    let digest = h.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
+/// v3 hybrid combiner with context binding (CatKDF-style: concatenated
+/// secrets plus a context structure under a domain-separated KDF).
+///
+/// `context` is the v3 transcript hash, which already commits the ETSI 014
+/// `key_ID`, negotiated key mode, master SAE-ID, QKD key length, both
+/// randoms, the KEM EK/CT and the server identity — so the combined secret
+/// is bound to exactly one session and one QKD key. This closes the
+/// "key ID as unbound metadata" finding (docs/audit-vs-eprint-2025-1671.md).
+///
+/// Note: hashing the QKD key is computationally secure (SHA3), which matches
+/// PQTG's quantum-safe-transport claim. It does NOT preserve information-
+/// theoretic security of the QKD key — do not claim ITS for the mixed key
+/// (see the audit note on the eprint 2025/1671 split-key/OTP construction).
+pub fn mix_keys_v3(qkd_key: &[u8], pqc_key: &[u8; 32], context: &[u8; 32]) -> [u8; 32] {
+    let mut h = Sha3_256::new();
+    h.update(KEY_MIXING_LABEL_V3);
+    h.update((qkd_key.len() as u32).to_be_bytes());
+    h.update(qkd_key);
+    h.update(pqc_key);
+    h.update(context);
     let digest = h.finalize();
     let mut out = [0u8; 32];
     out.copy_from_slice(&digest);
@@ -903,6 +992,91 @@ mod tests {
         let m1 = mix_keys(&qkd_key, &[0xAA; 32]);
         let m2 = mix_keys(&qkd_key, &[0xBB; 32]);
         assert_ne!(m1, m2);
+    }
+
+    // ── v3: transcript-bound QKD parameters (PROTOCOL-V3-QKD-KEYID.md §4) ───
+
+    fn v3_transcript_with(key_mode: u8, kid: &str, sae: &str, len: u32) -> [u8; 32] {
+        transcript_hash_v3(
+            &[0x01; 32],
+            &[0x02; 32],
+            &[0x03; 8],
+            &[0x04; 8],
+            &[0x05; 8],
+            key_mode,
+            kid.as_bytes(),
+            sae.as_bytes(),
+            len,
+        )
+    }
+
+    /// The whole point of v3: changing the key_ID changes the transcript —
+    /// a substituted key_ID can never verify under the server's signature.
+    #[test]
+    fn v3_transcript_binds_key_id() {
+        let t1 = v3_transcript_with(0x01, "uuid-aaaa", "101", 32);
+        let t2 = v3_transcript_with(0x01, "uuid-bbbb", "101", 32);
+        assert_ne!(t1, t2, "key_ID must be transcript-bound");
+    }
+
+    /// Flipping Hybrid→PqcOnly (downgrade) changes the transcript.
+    #[test]
+    fn v3_transcript_binds_key_mode() {
+        let t1 = v3_transcript_with(0x01, "uuid-aaaa", "101", 32);
+        let t2 = v3_transcript_with(0x00, "uuid-aaaa", "101", 32);
+        assert_ne!(
+            t1, t2,
+            "key_mode must be transcript-bound (no silent downgrade)"
+        );
+    }
+
+    /// Master SAE-ID and key length are likewise bound.
+    #[test]
+    fn v3_transcript_binds_sae_and_len() {
+        let base = v3_transcript_with(0x01, "uuid-aaaa", "101", 32);
+        assert_ne!(base, v3_transcript_with(0x01, "uuid-aaaa", "102", 32));
+        assert_ne!(base, v3_transcript_with(0x01, "uuid-aaaa", "101", 64));
+    }
+
+    /// v2 and v3 transcripts can never collide on equivalent inputs
+    /// (label separation).
+    #[test]
+    fn v3_transcript_domain_separated_from_v2() {
+        let v2 = transcript_hash(&[0x01; 32], &[0x02; 32], &[0x03; 8], &[0x04; 8], &[0x05; 8]);
+        let v3 = v3_transcript_with(0x00, "", "", 0);
+        assert_ne!(v2, v3);
+    }
+
+    /// The v3 combiner is context-sensitive: same secrets, different session
+    /// context ⇒ different combined key (the CatKDF-style binding).
+    #[test]
+    fn v3_key_mixing_is_sensitive_to_context() {
+        let qkd = vec![0x11u8; 32];
+        let pqc = [0x22u8; 32];
+        let m1 = mix_keys_v3(&qkd, &pqc, &[0xC1; 32]);
+        let m2 = mix_keys_v3(&qkd, &pqc, &[0xC2; 32]);
+        assert_ne!(m1, m2, "combiner must bind the session context");
+    }
+
+    /// v3 combiner and v2 combiner are domain-separated even with equal inputs.
+    #[test]
+    fn v3_key_mixing_domain_separated_from_v2() {
+        let qkd = vec![0x11u8; 32];
+        let pqc = [0x22u8; 32];
+        let v2 = mix_keys(&qkd, &pqc);
+        let v3 = mix_keys_v3(&qkd, &pqc, &[0u8; 32]);
+        assert_ne!(v2, v3);
+    }
+
+    /// v2/v3 session KDF label separation.
+    #[test]
+    fn v3_session_kdf_domain_separated_from_v2() {
+        let secret = [0x77u8; 32];
+        let transcript = [0x88u8; 32];
+        assert_ne!(
+            derive_session_key(&secret, &transcript),
+            derive_session_key_v3(&secret, &transcript)
+        );
     }
 
     // ── Identity persistence (issue #3) ─────────────────────────────────────

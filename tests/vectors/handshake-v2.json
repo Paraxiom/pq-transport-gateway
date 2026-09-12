@@ -1,0 +1,43 @@
+{
+  "_about": "PQTG v2.0.0 handshake key-schedule known-answer vectors. Generated independently (Python hashlib SHA3-256) from the constructions in src/crypto.rs; tests/handshake_kat.rs asserts the Rust implementation reproduces them. Byte-pattern inputs: kem_ek/falcon_pk/kem_ct are NOT valid keys, only hashed (transcript_hash never parses them). Labels are the v2 flat labels; a B2 (tree-of-labels) refactor MUST publish a new v3 set and keep this one for v2 interop.",
+  "labels": {
+    "transcript": "pqtg-transcript-v2",
+    "session_kdf": "pqtg-session-v2",
+    "key_mixing": "pqtg-key-mixing-v2",
+    "identity_fingerprint": "pqtg-identity-fingerprint-v1"
+  },
+  "inputs": {
+    "client_random": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "server_random": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "client_kem_ek": {
+      "len": 1184,
+      "pattern": "byte[i] = (7*i + 3) mod 256"
+    },
+    "server_falcon_pk": {
+      "len": 897,
+      "pattern": "byte[i] = (13*i + 5) mod 256"
+    },
+    "kem_ciphertext": {
+      "len": 1088,
+      "pattern": "byte[i] = (11*i + 9) mod 256"
+    },
+    "kem_secret": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "qkd_key_256": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+    "qkd_key_512": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+    "slh_dsa_vk": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
+  },
+  "expected": {
+    "transcript_hash": "8c6eb7de1b7e92d069bf03916ebde545094394475dc663a08e8ca6b1f1371363",
+    "session_key_pqc_only": "c28b0077eb31090371989436786f6b64de4ae67a307da1dcca8b713a1a77aae8",
+    "mix_keys_qkd256": "8f2b82f7599ea0e560395b1f4504172403d295124eb8ab913c2312e2b7270eff",
+    "session_key_hybrid_qkd256": "d6d9b438545889740e31747f47a7174f3df9cf98e97d91b9a77503b6707c2f12",
+    "mix_keys_qkd512": "030640350c85b4e610dc61ef14601a15ed1b0e5a1cd0f4a64f56df3e3772d77c",
+    "session_key_hybrid_qkd512": "54905a209f5a2f2dbfc90530f51c70c6ef86cddda4d43084cc1ee1ede1e4c09d",
+    "identity_fingerprint": "4d3501c2fe263faadabe7cb0a20744ec4f9387809c09072f033333ca1f386a8c",
+    "identity_fingerprint_formatted": "SHA3-256:TTUBwv4mP6ravnywogdE7E+Th4CcCQcvAzMzyh84aow"
+  },
+  "chain": {
+    "pqc_only": "session_key = SHA3-256(session_kdf || kem_secret || transcript)",
+    "hybrid": "session_key = SHA3-256(session_kdf || mix_keys(qkd_key, kem_secret) || transcript); mix_keys = SHA3-256(key_mixing || be32(len(qkd_key)) || qkd_key || kem_secret)"
+  }
+}

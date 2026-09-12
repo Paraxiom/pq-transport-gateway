@@ -1,0 +1,60 @@
+// Forward-secrecy variant of pqtg-relay-handshake.vp (THREAT-MODEL T3, S5,
+// "argued, not formally proved"): after the handshake completes, the server's
+// long-term Falcon key leaks (phase 1). Do the honest client's directional keys
+// from phase 0 stay confidential? Expected yes: the secret comes from an
+// ephemeral ML-KEM key pair, and the Falcon key only ever signed.
+// The server-side keys are deliberately not queried here: in the base model
+// they already fall to an attacker acting as the client (R1), which is a
+// separate matter from forward secrecy.
+
+attacker[active]
+
+principal Server[
+    knows public label_c2s, label_s2c
+    knows private server_sk
+    server_pk = PUBKEY(server_sk)
+    generates server_random
+]
+
+principal Client[
+    knows public label_c2s, label_s2c
+    knows private client_sk
+    client_pk = PUBKEY(client_sk)
+    generates client_random
+    generates kem_sk
+    kem_ek = PUBKEY(kem_sk)
+]
+
+Server -> Client: [server_pk]
+Client -> Server: client_random, kem_ek, client_pk
+
+principal Server[
+    generates kem_r
+    kem_ss, kem_ct = KEM_ENCAP(kem_ek, kem_r)
+    transcript_s = HASH(HASH(client_random, server_random, kem_ek), kem_ct, client_pk, server_pk)
+    transcript_sig = SIGN(server_sk, transcript_s)
+    key_s2c_s = HASH(label_s2c, kem_ss, transcript_s)
+    key_c2s_s = HASH(label_c2s, kem_ss, transcript_s)
+]
+
+Server -> Client: server_random, kem_ct, transcript_sig
+
+principal Client[
+    kem_ss_c = KEM_DECAP(kem_sk, kem_ct)
+    transcript_c = HASH(HASH(client_random, server_random, kem_ek), kem_ct, client_pk, server_pk)
+    _ = SIGNVERIF(server_pk, transcript_c, transcript_sig)?
+    key_c2s_c = HASH(label_c2s, kem_ss_c, transcript_c)
+    key_s2c_c = HASH(label_s2c, kem_ss_c, transcript_c)
+]
+
+phase[1]
+
+principal Server[
+    leaks server_sk
+]
+
+queries[
+    confidentiality? key_c2s_c
+    confidentiality? key_s2c_c
+    authentication? Server -> Client: transcript_sig
+]

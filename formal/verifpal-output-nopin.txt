@@ -1,0 +1,28 @@
+Verifpal 1.4.10 - https://verifpal.com
+ Verifpal * Verification initiated for 'pqtg-handshake-nopin.vp' at 07:28:10 AM.
+     Info . Analyzing 2 parallel sessions per principal; per-session values and principals are suffixed #2.
+     Info . Attacker is configured as active.
+     Info . Running at phase 0.
+     FAIL x authentication? Server -> Client: transcript_sig (Analysis 17)
+
+--------------------------------------------------
+ Verifpal * Verification completed for 'pqtg-handshake-nopin.vp' at 07:28:10 AM in 201ms.
+
+     PASS + confidentiality? session_key_s  [search exhausted at 2 sessions]
+     PASS + confidentiality? session_key_c  [search exhausted at 2 sessions]
+     FAIL x authentication? Server -> Client: transcript_sig
+            Attack trace:
+            | 1. Attacker constructs PUBKEY(nil).
+            | 2. Attacker replaces server_pk (sent by Server to Client) with PUBKEY(nil). (server_pk was PUBKEY(server_sk))
+            | 3. Attacker observes client_random on the wire.
+            | 4. Attacker observes kem_ek on the wire.
+            | 5. Attacker constructs HASH(client_random, nil, kem_ek, PUBKEY(nil), nil).
+            | 6. Attacker constructs SIGN(nil, HASH(client_random, nil, kem_ek, PUBKEY(nil), nil)).
+            | 7. Attacker replaces server_random, kem_ct, transcript_sig (sent by Server to Client) with nil, nil, SIGN(nil, HASH(client_random, nil, kem_ek, PUBKEY(nil), nil)). (kem_ct was KEM_ENCAP(kem_ek, kem_r)|2; transcript_sig was SIGN(server_sk, transcript_s))
+            | 8. Client's SIGNVERIF(PUBKEY(nil), HASH(client_random, nil, kem_ek, PUBKEY(nil), nil), SIGN(nil, HASH(client_random, nil, kem_ek, PUBKEY(nil), nil)))? passes — the attacker controls one of its inputs.
+            > transcript_sig (SIGN(nil, HASH(client_random, nil, kem_ek, PUBKEY(nil), nil))), sent by Attacker and not by Server, is successfully used in SIGNVERIF(server_pk, transcript_c, transcript_sig)? within Client's state.
+
+--------------------------------------------------
+     FAIL x 1 of 3 queries failed.
+ Verifpal * Thank you for using Verifpal.
+--- result code (verifpal verify --result-code --quiet): c0c0a1

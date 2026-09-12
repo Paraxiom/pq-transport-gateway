@@ -602,8 +602,12 @@ impl ProxyServer {
         // `qkd.default_master_sae_id` config value as this gateway's label.
         let master_sae_id = self.config.qkd.default_master_sae_id.clone();
 
-        let handshake =
-            ServerHandshake::new().respond_v3(&client_hello, &self.host_key, qkd, &master_sae_id)?;
+        let handshake = ServerHandshake::new().respond_v3(
+            &client_hello,
+            &self.host_key,
+            qkd,
+            &master_sae_id,
+        )?;
         write_framed(stream, handshake.server_hello()).await?;
         info!(
             "v3 session with {}: key_mode={:?}",
@@ -797,10 +801,7 @@ mod tests {
 
     /// Client-side v3 transcript reconstruction from wire data — what a real
     /// external client computes from its own hello + the ServerHelloV3.
-    fn client_transcript_v3(
-        hello: &ClientHelloV3,
-        sh: &ServerHelloV3,
-    ) -> [u8; 32] {
+    fn client_transcript_v3(hello: &ClientHelloV3, sh: &ServerHelloV3) -> [u8; 32] {
         transcript_hash_v3(
             &hello.client_random,
             &sh.server_random,

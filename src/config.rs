@@ -34,6 +34,20 @@ pub struct ProxyConfig {
     /// Allowed source IP ranges (CIDR notation)
     #[serde(default)]
     pub allowed_sources: Vec<String>,
+
+    /// v3 hello freshness (backlog B8): reject a ClientHello whose signed
+    /// timestamp is more than this many seconds from the server clock, in
+    /// either direction. Together with the replay cache this bounds how long a
+    /// recorded hello stays usable. Clients need clocks within this skew.
+    #[serde(default = "default_hello_max_skew_secs")]
+    pub hello_max_skew_secs: u64,
+
+    /// v3 hello replay cache capacity, in entries (32 bytes each plus
+    /// bookkeeping). Size to handshake rate × 2 × `hello_max_skew_secs`. Only
+    /// signature-valid, in-window hellos are inserted; when full the guard
+    /// fails closed rather than reopening the replay window.
+    #[serde(default = "default_hello_replay_cache_entries")]
+    pub hello_replay_cache_entries: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -438,6 +452,8 @@ impl Default for Config {
                 max_connections: default_max_connections(),
                 connection_timeout: default_connection_timeout(),
                 allowed_sources: vec![],
+                hello_max_skew_secs: default_hello_max_skew_secs(),
+                hello_replay_cache_entries: default_hello_replay_cache_entries(),
             },
             qkd: QkdConfig {
                 vendor_api: "https://localhost:8080".to_string(),
@@ -483,6 +499,12 @@ fn default_max_connections() -> usize {
 }
 fn default_connection_timeout() -> u64 {
     30
+}
+fn default_hello_max_skew_secs() -> u64 {
+    120
+}
+fn default_hello_replay_cache_entries() -> usize {
+    131_072
 }
 fn default_qkd_api_version() -> String {
     "1.1.1".to_string()

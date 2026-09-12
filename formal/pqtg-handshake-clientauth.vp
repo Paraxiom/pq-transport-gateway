@@ -1,0 +1,76 @@
+// PQTG handshake WITH client authentication of the hello (backlog B6, closes F1)
+// ---------------------------------------------------------------------------
+// Same model as formal/pqtg-handshake.vp (the v2 shape: the extra public v3
+// transcript fields, key_mode / qkd_key_id / master_sae_id / qkd_key_len, are
+// constants to a symbolic attacker and change nothing here) with ONE addition:
+// the client signs its hello with its allow-listed Falcon-512 identity key, and
+// the server verifies that signature BEFORE encapsulating or touching QKD.
+//
+// Code mapping (feat/v3-client-auth, src/proxy.rs ClientHelloV3.hello_sig):
+//   hello_sig = Falcon.sign(client_sk,
+//       SHA3-256("pqtg-client-hello-v3" ‖ client_random ‖ len‖kem_ek ‖ len‖falcon_vk
+//                ‖ len‖slh_dsa_vk ‖ requested_key_size ‖ len‖client_sae_id ‖ qkd_capable))
+//   server: verify_client (allow-list) then verify hello_sig, else reject.
+// Here the digest is abstracted as HASH(client_random, kem_ek): the two fields
+// an attacker would have to substitute to mount F1.
+//
+// The allow-list is modelled as guarded delivery of client_pk to the server:
+// the server holds an authentic copy of the authorized client's key
+// (authorized_keys, distributed out of band), the attacker may read it but
+// cannot replace it. Server pinning is the guarded [server_pk] as before.
+//
+// Expected, vs formal/pqtg-handshake-leak-qkd.vp (F1): with the QKD key public,
+// session_key_s must now HOLD, because the attacker cannot produce hello_sig
+// over a substituted kem_ek. The hello is one-shot, so its authentication
+// query may report a replay at 2 sessions; that is the QKD-consumption
+// residual tracked as B8, not F1.
+
+attacker[active]
+
+principal Server[
+    knows private qkd_key
+    knows private server_sk
+    server_pk = PUBKEY(server_sk)
+    generates server_random
+]
+
+principal Client[
+    knows private qkd_key
+    knows private client_sk            // Falcon-512 identity, allow-listed at the server
+    client_pk = PUBKEY(client_sk)
+    generates client_random
+    generates kem_sk
+    kem_ek = PUBKEY(kem_sk)
+    hello_sig = SIGN(client_sk, HASH(client_random, kem_ek))
+]
+
+Server -> Client: [server_pk]
+Client -> Server: [client_pk]
+Client -> Server: client_random, kem_ek, hello_sig
+
+principal Server[
+    _ = SIGNVERIF(client_pk, HASH(client_random, kem_ek), hello_sig)?
+    generates kem_r
+    kem_ss, kem_ct = KEM_ENCAP(kem_ek, kem_r)
+    transcript_s = HASH(client_random, server_random, kem_ek, server_pk, kem_ct)
+    transcript_sig = SIGN(server_sk, transcript_s)
+    mixed_s = HASH(qkd_key, kem_ss)
+    session_key_s = HASH(mixed_s, transcript_s)
+]
+
+Server -> Client: server_random, kem_ct, transcript_sig
+
+principal Client[
+    kem_ss_c = KEM_DECAP(kem_sk, kem_ct)
+    transcript_c = HASH(client_random, server_random, kem_ek, server_pk, kem_ct)
+    _ = SIGNVERIF(server_pk, transcript_c, transcript_sig)?
+    mixed_c = HASH(qkd_key, kem_ss_c)
+    session_key_c = HASH(mixed_c, transcript_c)
+]
+
+queries[
+    confidentiality? session_key_s
+    confidentiality? session_key_c
+    authentication? Server -> Client: transcript_sig
+    authentication? Client -> Server: hello_sig
+]

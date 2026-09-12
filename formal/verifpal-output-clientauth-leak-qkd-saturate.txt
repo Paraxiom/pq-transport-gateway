@@ -1,0 +1,33 @@
+──────────────────────────────────────────────────
+  ◆ Verifpal 1.4.10 · https://verifpal.com
+──────────────────────────────────────────────────
+     Info ● Verdicts were unchanged from 2 sessions through 3; analyzing at 3.
+ Verifpal ◆ Verification initiated for 'pqtg-handshake-clientauth-leak-qkd.vp' at 08:44:47 AM.
+     Info ● Analyzing 3 parallel sessions per principal; per-session values and principals are suffixed #2 through #3.
+     Info ● Attacker is configured as active.
+     Info ● Running at phase 0.
+     Info ● authentication? Client -> Server: hello_sig reports a duplicate that Server cannot rule out on its own: it contributes nothing to hello_sig before accepting it, so any run of it takes the same message twice. Read it as a replay-protection question about this flight rather than as a forgery.
+     Fail ✗ authentication? Client -> Server: hello_sig (Analysis 59)
+
+──────────────────────────────────────────────────
+ Verifpal ◆ Verification completed for 'pqtg-handshake-clientauth-leak-qkd.vp' at 08:44:47 AM in 148ms.
+
+     Pass ✓ confidentiality? session_key_s  [search exhausted at 3 sessions]
+     Pass ✓ confidentiality? session_key_c  [search exhausted at 3 sessions]
+     Pass ✓ authentication? Server -> Client: transcript_sig  [search exhausted at 3 sessions]
+     Fail ✗ authentication? Client -> Server: hello_sig  [duplicate acceptance: no recipient-generated context]
+            ╭─ Attack trace:
+            │ 1. Attacker observes client_random#2 on the wire.
+            │ 2. Attacker replays client_random (Client to Server) from another session, where it is client_random#2.
+            │ 3. Attacker observes kem_ek#2 on the wire, where it is PUBKEY(kem_sk#2).
+            │ 4. Attacker replays kem_ek (Client to Server) from another session, where it is PUBKEY(kem_sk#2).
+            │ 5. Attacker observes hello_sig#2 on the wire, where it is SIGN(client_sk, HASH(client_random#2, PUBKEY(kem_sk#2))).
+            │ 6. Attacker replays hello_sig (Client to Server) from another session, where it is SIGN(client_sk, HASH(client_random#2, PUBKEY(kem_sk#2))).
+            │ 7. Server's SIGNVERIF(client_pk, HASH(client_random#2, PUBKEY(kem_sk#2)), SIGN(client_sk, HASH(client_random#2, PUBKEY(kem_sk#2))))? passes — the attacker controls one of its inputs.
+            │ 8. Attacker observes client_pk on the wire.
+            │ 9. Attacker constructs HASH(client_random#2, PUBKEY(kem_sk#2)).
+            ╰▸ hello_sig (SIGN(client_sk, HASH(client_random#2, PUBKEY(kem_sk#2)))), which Client sent in another session and not in this one, is successfully used in SIGNVERIF(client_pk, HASH(client_random, kem_ek), hello_sig)? within Server's state: Client sent it once, Server accepts it twice, so agreement is not injective.
+
+──────────────────────────────────────────────────
+     Fail ✗ 1 of 4 queries failed.
+ Verifpal ◆ Thank you for using Verifpal.

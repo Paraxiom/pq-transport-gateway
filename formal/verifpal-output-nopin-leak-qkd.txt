@@ -1,0 +1,47 @@
+Verifpal 1.4.10 - https://verifpal.com
+ Verifpal * Verification initiated for 'pqtg-handshake-nopin-leak-qkd.vp' at 07:28:10 AM.
+     Info . Analyzing 2 parallel sessions per principal; per-session values and principals are suffixed #2.
+     Info . Attacker is configured as active.
+     Info . Running at phase 0.
+     FAIL x confidentiality? session_key_s (Analysis 6)
+     FAIL x confidentiality? session_key_c (Analysis 12)
+
+--------------------------------------------------
+ Verifpal * Verification completed for 'pqtg-handshake-nopin-leak-qkd.vp' at 07:28:11 AM in 247ms.
+
+     FAIL x confidentiality? session_key_s
+            Attack trace:
+            | 1. Attacker constructs PUBKEY(nil).
+            | 2. Attacker replaces kem_ek (sent by Client to Server) with PUBKEY(nil). (kem_ek was PUBKEY(kem_sk))
+            | 3. Attacker observes KEM_ENCAP(PUBKEY(nil), kem_r)|2 on the wire.
+            | 4. Attacker opens KEM_ENCAP(PUBKEY(nil), kem_r)|2 with nil, obtaining KEM_ENCAP(PUBKEY(nil), kem_r)|1.
+            | 5. Attacker constructs HASH(qkd_key, KEM_ENCAP(PUBKEY(nil), kem_r)|1).
+            | 6. Attacker observes client_random on the wire.
+            | 7. Attacker observes server_random on the wire.
+            | 8. Attacker observes server_pk on the wire.
+            | 9. Attacker constructs HASH(client_random, server_random, PUBKEY(nil), server_pk, KEM_ENCAP(PUBKEY(nil), kem_r)|2).
+            | 10. Attacker constructs HASH(HASH(qkd_key, KEM_ENCAP(PUBKEY(nil), kem_r)|1), HASH(client_random, server_random, PUBKEY(nil), server_pk, KEM_ENCAP(PUBKEY(nil), kem_r)|2)).
+            > session_key_s (HASH(HASH(qkd_key, KEM_ENCAP(PUBKEY(nil), kem_r)|1), HASH(client_random, server_random, PUBKEY(nil), server_pk, KEM_ENCAP(PUBKEY(nil), kem_r)|2))) is obtained by Attacker.
+     FAIL x confidentiality? session_key_c
+            Attack trace:
+            | 1. During Server's run (phase 0), attacker constructs PUBKEY(nil).
+            | 2. Attacker replaces client_random#2, kem_ek#2 (sent by Client#2 to Server#2) with nil, PUBKEY(nil). (kem_ek#2 was PUBKEY(kem_sk#2))
+            | 3. During Server's run (phase 0), attacker observes PUBKEY(kem_sk) on the wire.
+            | 4. During Server's run (phase 0), attacker observes KEM_ENCAP(PUBKEY(nil), kem_r)|2 on the wire.
+            | 5. During Server's run (phase 0), attacker opens KEM_ENCAP(PUBKEY(nil), kem_r)|2 with nil, obtaining kem_r.
+            | 6. During Client's run (phase 0), attacker constructs KEM_ENCAP(PUBKEY(kem_sk), kem_r)|1.
+            | 7. During Client's run (phase 0), attacker constructs HASH(qkd_key, KEM_ENCAP(PUBKEY(kem_sk), kem_r)|1).
+            | 8. During Server's run (phase 0), attacker observes client_random on the wire.
+            | 9. During Server's run (phase 0), attacker observes server_random on the wire.
+            | 10. During Server's run (phase 0), attacker observes server_pk on the wire.
+            | 11. During Server's run (phase 0), attacker observes KEM_ENCAP(PUBKEY(kem_sk), kem_r)|2 on the wire.
+            | 12. During Server's run (phase 0), attacker constructs HASH(client_random, server_random, PUBKEY(kem_sk), server_pk, KEM_ENCAP(PUBKEY(kem_sk), kem_r)|2).
+            | 13. During Client's run (phase 0), attacker constructs HASH(HASH(qkd_key, KEM_ENCAP(PUBKEY(kem_sk), kem_r)|1), HASH(client_random, server_random, PUBKEY(kem_sk), server_pk, KEM_ENCAP(PUBKEY(kem_sk), kem_r)|2)).
+            | Note: these are the substitutions the search recorded; no subset of them was confirmed to reproduce the violation on its own, so this trace is not a minimized witness.
+            > session_key_c (HASH(HASH(qkd_key, KEM_ENCAP(PUBKEY(kem_sk), kem_r)|1), HASH(client_random, server_random, PUBKEY(kem_sk), server_pk, KEM_ENCAP(PUBKEY(kem_sk), kem_r)|2))) is obtained by Attacker.
+     PASS + authentication? Server -> Client: transcript_sig  [search exhausted at 2 sessions]
+
+--------------------------------------------------
+     FAIL x 2 of 3 queries failed.
+ Verifpal * Thank you for using Verifpal.
+--- result code (verifpal verify --result-code --quiet): c1c1a0

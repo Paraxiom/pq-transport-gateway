@@ -1,0 +1,68 @@
+// SUPERSEDED first cut, retained for comparison only: ML-KEM abstracted as PKE_ENC/PKE_DEC with a
+// server-chosen secret. pqtg-handshake.vp (native KEM_ENCAP/KEM_DECAP) is the model of record.
+// ---------------------------------------------------------------------------
+// Maps to src/crypto.rs + src/proxy.rs. This is B1 of the assurance backlog
+// (docs/NLNET-PROPOSAL-AND-ROSENPASS-BACKLOG-2026-09-12.md) and the headline
+// NLnet deliverable: a formally-verified PQ handshake WITH a QKD hybrid.
+//
+// Abstractions (symbolic, standard for a first model):
+//   ML-KEM-768 encapsulation  ->  public-key encryption  (PKE_ENC / PKE_DEC)
+//   Falcon-512 signature       ->  SIGN / SIGNVERIF
+//   SHA3-256 transcript/KDF/mix ->  HASH
+//   QKD key (ETSI-014, out-of-band)  ->  pre-shared private secret
+//   server identity pinning    ->  guarded delivery [server_pk]
+//
+// What this model claims to check:
+//   1. session-key confidentiality against an active attacker
+//   2. server authentication to the client (explicit, via transcript_sig)
+// Client authentication and the "secure if EITHER leg holds" hybrid property
+// are handled separately — see formal/README.md.
+
+attacker[active]
+
+principal Server[
+    knows private qkd_key            // QKD key delivered out-of-band (ETSI GS QKD 014)
+    knows private server_sk          // Falcon-512 long-term identity secret
+    server_pk = PUBKEY(server_sk)
+    generates server_random
+]
+
+principal Client[
+    knows private qkd_key            // same out-of-band QKD key
+    generates client_random
+    generates kem_sk                 // ephemeral ML-KEM-768 secret
+    kem_ek = PUBKEY(kem_sk)          // ML-KEM encapsulation (public) key
+]
+
+// Client has the authentic server identity pinned (fingerprint pinning):
+// guarded delivery — an active attacker may read it but cannot tamper with it.
+Server -> Client: [server_pk]
+
+// ClientHello (slh_dsa_vk and client Falcon vk omitted in this first cut; see README)
+Client -> Server: client_random, kem_ek
+
+principal Server[
+    generates kem_ss                                 // ML-KEM shared secret
+    kem_ct = PKE_ENC(kem_ek, kem_ss)                 // encapsulate_to(client_ek)
+    transcript_s = HASH(client_random, server_random, kem_ek, server_pk, kem_ct)
+    transcript_sig = SIGN(server_sk, transcript_s)   // sign_transcript (Falcon-512)
+    mixed_s = HASH(qkd_key, kem_ss)                  // mix_keys(qkd_key, pqc_secret)
+    session_key_s = HASH(mixed_s, transcript_s)      // derive_session_key
+]
+
+// ServerHello
+Server -> Client: server_random, kem_ct, transcript_sig
+
+principal Client[
+    kem_ss_c = PKE_DEC(kem_sk, kem_ct)
+    transcript_c = HASH(client_random, server_random, kem_ek, server_pk, kem_ct)
+    _ = SIGNVERIF(server_pk, transcript_c, transcript_sig)?   // authenticate the server
+    mixed_c = HASH(qkd_key, kem_ss_c)
+    session_key_c = HASH(mixed_c, transcript_c)
+]
+
+queries[
+    confidentiality? session_key_s
+    confidentiality? session_key_c
+    authentication? Server -> Client: transcript_sig
+]

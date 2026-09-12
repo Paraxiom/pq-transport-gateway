@@ -1,0 +1,75 @@
+// VARIANT nopin: base model with server_pk delivered UNGUARDED (client performs no fingerprint pin; this is src/relay.rs::client_handshake as it stands)
+// ---------------------------------------------------------------------------
+// Maps to src/crypto.rs + src/proxy.rs::perform_handshake. This is B1 of the
+// assurance backlog (docs/NLNET-PROPOSAL-AND-ROSENPASS-BACKLOG-2026-09-12.md)
+// and the headline NLnet deliverable: a formally-verified PQ handshake WITH a
+// QKD hybrid. Run with Verifpal 1.4.10; results and the change log are in
+// formal/VERIFICATION-RESULTS-2026-09-12.md.
+//
+// Abstractions (symbolic, standard for a first model):
+//   ML-KEM-768 encaps/decaps    ->  KEM_ENCAP / KEM_DECAP (Verifpal's native KEM:
+//                                   the shared secret is an OUTPUT of encapsulation,
+//                                   exactly as crypto.rs::encapsulate_to returns (ct, ss))
+//   Falcon-512 signature        ->  SIGN / SIGNVERIF
+//   SHA3-256 transcript/KDF/mix ->  HASH (the Rust domain labels and length prefixes
+//                                   are public constants; not modeled — see README)
+//   QKD key (ETSI-014, out-of-band) -> pre-shared private secret on both sides
+//   server identity pinning     ->  guarded delivery [server_pk]
+//       ASSUMPTION: the client performs the fingerprint pin check specified in
+//       docs/CLIENT-INTEGRATION.md (§2 step 5). No client in src/ does so yet
+//       (THREAT-MODEL.md L2). pqtg-handshake-nopin.vp models the unpinned client.
+//
+// What this model claims to check:
+//   1. session-key confidentiality against an active attacker
+//   2. server authentication to the client (explicit, via transcript_sig)
+// Client authentication and the "secure if EITHER leg holds" hybrid property
+// are handled separately — see formal/README.md.
+
+attacker[active]
+
+principal Server[
+    knows private qkd_key            // QKD key delivered out-of-band (ETSI GS QKD 014)
+    knows private server_sk          // Falcon-512 long-term identity secret
+    server_pk = PUBKEY(server_sk)
+    generates server_random
+]
+
+principal Client[
+    knows private qkd_key            // same out-of-band QKD key
+    generates client_random
+    generates kem_sk                 // ephemeral ML-KEM-768 decapsulation key
+    kem_ek = PUBKEY(kem_sk)          // ML-KEM encapsulation (public) key
+]
+
+// VARIANT: the client does NOT pin the server identity; it takes server_pk from the wire
+// (unguarded delivery — an active attacker may substitute it)
+Server -> Client: server_pk
+
+// ClientHello (falcon_vk, slh_dsa_vk, requested_key_size, version omitted; see README)
+Client -> Server: client_random, kem_ek
+
+principal Server[
+    generates kem_r                                  // ML-KEM encapsulation randomness
+    kem_ss, kem_ct = KEM_ENCAP(kem_ek, kem_r)        // encapsulate_to(client_ek) -> (ct, ss)
+    transcript_s = HASH(client_random, server_random, kem_ek, server_pk, kem_ct)
+    transcript_sig = SIGN(server_sk, transcript_s)   // sign_transcript (Falcon-512)
+    mixed_s = HASH(qkd_key, kem_ss)                  // mix_keys(qkd_key, pqc_secret)
+    session_key_s = HASH(mixed_s, transcript_s)      // derive_session_key(final_secret, transcript)
+]
+
+// ServerHello (its falcon_vk copy is redundant under pinning; slh_dsa_vk, version omitted)
+Server -> Client: server_random, kem_ct, transcript_sig
+
+principal Client[
+    kem_ss_c = KEM_DECAP(kem_sk, kem_ct)             // decapsulate (ML-KEM implicit rejection: no `?`)
+    transcript_c = HASH(client_random, server_random, kem_ek, server_pk, kem_ct)
+    _ = SIGNVERIF(server_pk, transcript_c, transcript_sig)?   // authenticate the server; halt on failure
+    mixed_c = HASH(qkd_key, kem_ss_c)
+    session_key_c = HASH(mixed_c, transcript_c)
+]
+
+queries[
+    confidentiality? session_key_s
+    confidentiality? session_key_c
+    authentication? Server -> Client: transcript_sig
+]

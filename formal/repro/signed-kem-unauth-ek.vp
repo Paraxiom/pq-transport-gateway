@@ -1,0 +1,20 @@
+// Minimal repro: signed KEM ciphertext, pinned signing key, unauthenticated ek.
+// k_s: attacker substitutes ek, learns ss -> expected c1 (real).
+// k_c: client only accepts ct signed with its own ek -> expected c0 in reality.
+attacker[active]
+principal Server[ knows private ssk
+  spk = PUBKEY(ssk) ]
+principal Client[ generates dk
+  ek = PUBKEY(dk) ]
+Server -> Client: [spk]
+Client -> Server: ek
+principal Server[ generates r
+  ss, ct = KEM_ENCAP(ek, r)
+  sig = SIGN(ssk, HASH(ek, ct))
+  k_s = HASH(ss) ]
+Server -> Client: ct, sig
+principal Client[ ss_c = KEM_DECAP(dk, ct)
+  _ = SIGNVERIF(spk, HASH(ek, ct), sig)?
+  k_c = HASH(ss_c) ]
+queries[ confidentiality? k_s
+  confidentiality? k_c ]

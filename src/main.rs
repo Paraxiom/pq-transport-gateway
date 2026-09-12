@@ -14,6 +14,7 @@ mod crypto;
 mod proxy;
 mod qkd_client;
 mod relay;
+mod replay;
 
 use config::Config;
 use proxy::ProxyServer;
@@ -121,6 +122,9 @@ fn spawn_relay(config: Arc<Config>) -> Result<()> {
         "server" => {
             let backend = config.relay.backend.expect("validated at config load");
             let max = config.relay.max_connections;
+            // Validated at config load too; parsed again here so the policy
+            // handed to the server is the one the operator wrote.
+            let clients = config.relay.client_policy()?;
             tokio::spawn(async move {
                 let listener = match TcpListener::bind(listen).await {
                     Ok(l) => l,
@@ -129,7 +133,7 @@ fn spawn_relay(config: Arc<Config>) -> Result<()> {
                         return;
                     }
                 };
-                let server = RelayServer::new(identity, backend, max);
+                let server = RelayServer::new(identity, backend, max, clients);
                 if let Err(e) = server.serve(listener).await {
                     error!("relay server exited: {e}");
                 }

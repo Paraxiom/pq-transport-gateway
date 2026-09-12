@@ -35,7 +35,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use pq_qkd_proxy::crypto::PqKeyExchange;
-use pq_qkd_proxy::relay::{PinPolicy, RelayClient, RelayServer, ServerPin};
+use pq_qkd_proxy::relay::{ClientPolicy, PinPolicy, RelayClient, RelayServer, ServerPin};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -51,7 +51,9 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         eprintln!("usage:");
-        eprintln!("  relay_wan server      <listen> <backend>");
+        eprintln!(
+            "  relay_wan server      <listen> <backend> --client SHA3-256:<b64> [--client ...] | --any-client"
+        );
         eprintln!(
             "  relay_wan client      <listen> <remote> --pin SHA3-256:<b64> | --insecure-no-pin"
         );
@@ -65,6 +67,7 @@ async fn main() -> Result<()> {
         "server" => {
             let listen: std::net::SocketAddr = args[2].parse()?;
             let backend: std::net::SocketAddr = args[3].parse()?;
+            let clients = client_policy_from_args(&args[4..])?;
             let identity = Arc::new(load_or_make_identity("relay_wan_server.key")?);
             let listener = TcpListener::bind(listen).await?;
             println!("relay server on {listen}, forwarding to {backend}");
@@ -72,7 +75,15 @@ async fn main() -> Result<()> {
                 "identity fingerprint {} (clients pin this)",
                 ServerPin::of(&identity)
             );
-            RelayServer::new(identity, backend, 256)
+            match &clients {
+                ClientPolicy::Authorized(list) => {
+                    println!("accepting {} allow-listed client(s)", list.len())
+                }
+                ClientPolicy::AnyClient => println!(
+                    "accepting ANY client (--any-client): {backend} is reachable by anyone who can reach {listen}"
+                ),
+            }
+            RelayServer::new(identity, backend, 256, clients)
                 .serve(listener)
                 .await?;
         }
@@ -153,6 +164,37 @@ fn pin_policy_from_args(rest: &[String]) -> Result<PinPolicy> {
              link you already trust"
         )
     })
+}
+
+/// `--client <fingerprint>` (repeatable) or `--any-client`. No flag is an
+/// error: an open relay exposes its backend to anyone who can reach the port.
+fn client_policy_from_args(rest: &[String]) -> Result<ClientPolicy> {
+    let mut it = rest.iter();
+    let mut allowed = Vec::new();
+    let mut any = false;
+    while let Some(flag) = it.next() {
+        match flag.as_str() {
+            "--client" => {
+                let value = it
+                    .next()
+                    .ok_or_else(|| anyhow!("--client needs a value like SHA3-256:<base64>"))?;
+                allowed.push(ServerPin::parse(value)?);
+            }
+            "--any-client" => any = true,
+            other => return Err(anyhow!("unknown server flag {other}")),
+        }
+    }
+    if !allowed.is_empty() {
+        return Ok(ClientPolicy::Authorized(allowed));
+    }
+    if any {
+        return Ok(ClientPolicy::AnyClient);
+    }
+    Err(anyhow!(
+        "relay_wan server needs --client SHA3-256:<base64> for each allowed client (run \
+         `relay_wan fingerprint <keyfile>` on the client), or --any-client only when the backend \
+         authenticates its own peers"
+    ))
 }
 
 fn load_or_make_identity(path: &str) -> Result<PqKeyExchange> {

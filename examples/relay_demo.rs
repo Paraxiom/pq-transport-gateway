@@ -16,7 +16,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use pq_qkd_proxy::crypto::PqKeyExchange;
-use pq_qkd_proxy::relay::{client_handshake, PinPolicy, RelayClient, RelayServer, ServerPin};
+use pq_qkd_proxy::relay::{
+    client_handshake, ClientPolicy, PinPolicy, RelayClient, RelayServer, ServerPin,
+};
 
 /// A backend that echoes whatever it is sent, standing in for a validator's
 /// p2p port or any other TCP service.
@@ -63,23 +65,36 @@ async fn main() -> Result<()> {
     let backend = spawn_echo().await?;
     println!("  backend (plaintext TCP)      {backend}");
 
+    // The pin and the allow-list are what operators distribute out of band;
+    // here the demo simply has both keys in hand.
+    let client_identity = Arc::new(PqKeyExchange::new()?);
     let server_identity = Arc::new(PqKeyExchange::new()?);
-    // The pin is what the operator distributes out of band; here the demo
-    // simply has the key in hand.
     let server_pin = ServerPin::of(&server_identity);
     let server_listener = TcpListener::bind("127.0.0.1:0").await?;
     let server_addr = server_listener.local_addr()?;
-    let server = RelayServer::new(server_identity, backend, 256);
+    let server = RelayServer::new(
+        server_identity,
+        backend,
+        256,
+        ClientPolicy::Authorized(vec![ServerPin::of(&client_identity)]),
+    );
     tokio::spawn(async move {
         let _ = server.serve(server_listener).await;
     });
     println!("  relay server (post-quantum)  {server_addr}  ->  {backend}");
     println!("  server identity pinned as    {server_pin}");
+    println!(
+        "  client allow-listed as       {}",
+        ServerPin::of(&client_identity)
+    );
 
-    let client_identity = Arc::new(PqKeyExchange::new()?);
     let client_listener = TcpListener::bind("127.0.0.1:0").await?;
     let client_addr = client_listener.local_addr()?;
-    let client = RelayClient::new(client_identity, server_addr, PinPolicy::Require(server_pin));
+    let client = RelayClient::new(
+        client_identity.clone(),
+        server_addr,
+        PinPolicy::Require(server_pin),
+    );
     tokio::spawn(async move {
         let _ = client.serve(client_listener).await;
     });
@@ -89,10 +104,10 @@ async fn main() -> Result<()> {
     // ---- 1. handshake cost ------------------------------------------------
     println!();
     println!("  1. Handshake");
-    let id = PqKeyExchange::new()?;
     let mut probe = TcpStream::connect(server_addr).await?;
     let t = Instant::now();
-    let mut session = client_handshake(&mut probe, &id, PinPolicy::Require(server_pin)).await?;
+    let mut session =
+        client_handshake(&mut probe, &client_identity, PinPolicy::Require(server_pin)).await?;
     let handshake_us = t.elapsed().as_micros();
     println!("     ML-KEM-768 + Falcon-512 over a SHA3-256 transcript");
     println!("     completed in {handshake_us} us");

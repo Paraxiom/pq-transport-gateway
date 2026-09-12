@@ -172,6 +172,17 @@ pub struct RelayConfig {
     /// a bench on a link you already trust; never for a validator.
     #[serde(default)]
     pub allow_unpinned: bool,
+    /// Server mode: relay clients allowed to open a tunnel to `backend`, by
+    /// identity fingerprint (`SHA3-256:<base64>`, what `--print-fingerprint`
+    /// prints on each client). Required unless `allow_any_client` is set: a
+    /// relay server that accepts any client is an open door to its backend
+    /// (Verifpal finding R1, `formal/RELAY-RESULTS-2026-09-12.md`).
+    #[serde(default)]
+    pub authorized_clients: Vec<String>,
+    /// Server mode: accept any client that signs its hello. Logged at WARN on
+    /// every handshake. Only for a backend that authenticates its own peers.
+    #[serde(default)]
+    pub allow_any_client: bool,
 }
 
 fn default_relay_mode() -> String {
@@ -193,6 +204,8 @@ impl Default for RelayConfig {
             max_connections: default_relay_max_connections(),
             pin: None,
             allow_unpinned: false,
+            authorized_clients: Vec::new(),
+            allow_any_client: false,
         }
     }
 }
@@ -200,6 +213,35 @@ impl Default for RelayConfig {
 impl RelayConfig {
     pub fn is_enabled(&self) -> bool {
         self.mode != "off"
+    }
+
+    /// The client policy for server mode. A non-empty allow-list always wins;
+    /// `allow_any_client` only matters when the list is empty.
+    pub fn client_policy(&self) -> Result<crate::relay::ClientPolicy> {
+        use crate::relay::{ClientPolicy, ServerPin};
+        if !self.authorized_clients.is_empty() {
+            let list = self
+                .authorized_clients
+                .iter()
+                .map(|s| {
+                    ServerPin::parse(s).map_err(|e| {
+                        anyhow::anyhow!(
+                            "relay.authorized_clients entry {s:?} is not a valid fingerprint: {e}"
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            return Ok(ClientPolicy::Authorized(list));
+        }
+        if self.allow_any_client {
+            return Ok(ClientPolicy::AnyClient);
+        }
+        anyhow::bail!(
+            "relay.mode = \"server\" requires relay.authorized_clients (each client's fingerprint \
+             from `pq-qkd-proxy --print-fingerprint`), or relay.allow_any_client = true only when \
+             the backend authenticates its own peers: an open relay exposes the backend to anyone \
+             who can reach this port"
+        )
     }
 
     /// The server-identity policy for client mode. A configured pin always
@@ -235,7 +277,9 @@ impl RelayConfig {
                 if self.max_connections == 0 {
                     anyhow::bail!("relay.max_connections must be greater than zero");
                 }
-                Ok(())
+                // Refuse a missing or malformed allow-list at startup, not on
+                // the first connection.
+                self.client_policy().map(|_| ())
             }
             "client" => {
                 if self.listen.is_none() {
@@ -551,9 +595,9 @@ audit_log = "/var/log/pq-qkd-proxy/audit.log"
 
     #[test]
     fn a_bare_address_is_an_exact_match() {
-        let c = cfg_with_sources(&["51.79.26.123"]);
-        assert!(c.is_allowed_source(&sock("51.79.26.123")));
-        assert!(!c.is_allowed_source(&sock("51.79.26.124")));
+        let c = cfg_with_sources(&["203.0.113.7"]);
+        assert!(c.is_allowed_source(&sock("203.0.113.7")));
+        assert!(!c.is_allowed_source(&sock("203.0.113.8")));
     }
 
     #[test]
@@ -593,9 +637,9 @@ audit_log = "/var/log/pq-qkd-proxy/audit.log"
 
     #[test]
     fn several_rules_are_a_union() {
-        let c = cfg_with_sources(&["10.0.0.0/8", "51.79.26.123", "2001:db8::/32"]);
+        let c = cfg_with_sources(&["10.0.0.0/8", "203.0.113.7", "2001:db8::/32"]);
         assert!(c.is_allowed_source(&sock("10.9.9.9")));
-        assert!(c.is_allowed_source(&sock("51.79.26.123")));
+        assert!(c.is_allowed_source(&sock("203.0.113.7")));
         assert!(c.is_allowed_source(&v6("2001:db8::5")));
         assert!(!c.is_allowed_source(&sock("8.8.8.8")));
     }
@@ -649,7 +693,71 @@ audit_log = "/var/log/pq-qkd-proxy/audit.log"
         r.listen = Some(sock("127.0.0.1"));
         assert!(r.validate().is_err(), "still no backend");
         r.backend = Some(sock("127.0.0.1"));
+        assert!(r.validate().is_err(), "still no client allow-list");
+        r.allow_any_client = true;
         assert!(r.validate().is_ok());
+    }
+
+    // ---- relay server client allow-list (Verifpal R1) ---------------------
+
+    fn server_cfg() -> RelayConfig {
+        RelayConfig {
+            standalone: false,
+            mode: "server".into(),
+            listen: Some(sock("127.0.0.1")),
+            backend: Some(sock("127.0.0.1")),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_server_without_an_allow_list_is_refused_at_startup() {
+        // The open relay is the R1 configuration. It must not start by
+        // default, and the error must tell the operator what to do.
+        let err = server_cfg().validate().unwrap_err().to_string();
+        assert!(err.contains("relay.authorized_clients"), "got: {err}");
+        assert!(err.contains("print-fingerprint"), "got: {err}");
+    }
+
+    #[test]
+    fn a_server_with_a_valid_allow_list_starts_and_enforces_it() {
+        let mut r = server_cfg();
+        r.authorized_clients = vec![test_pin(), test_pin()];
+        assert!(r.validate().is_ok());
+        match r.client_policy().expect("policy") {
+            crate::relay::ClientPolicy::Authorized(list) => assert_eq!(list.len(), 2),
+            other => panic!("expected Authorized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_malformed_allow_list_entry_is_refused_at_startup() {
+        for bad in ["", "SHA3-256:", "SHA3-256:AAAA", "deadbeef"] {
+            let mut r = server_cfg();
+            r.authorized_clients = vec![test_pin(), bad.into()];
+            let err = r.validate().unwrap_err().to_string();
+            assert!(
+                err.contains("relay.authorized_clients"),
+                "{bad:?}: got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn allow_any_client_is_an_explicit_opt_out() {
+        let mut r = server_cfg();
+        r.allow_any_client = true;
+        assert!(r.validate().is_ok());
+        assert!(matches!(
+            r.client_policy().expect("policy"),
+            crate::relay::ClientPolicy::AnyClient
+        ));
+        // A non-empty allow-list wins over the opt-out.
+        r.authorized_clients = vec![test_pin()];
+        assert!(matches!(
+            r.client_policy().expect("policy"),
+            crate::relay::ClientPolicy::Authorized(_)
+        ));
     }
 
     #[test]

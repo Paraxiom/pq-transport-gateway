@@ -2,8 +2,8 @@
 // server-chosen secret. pqtg-handshake.vp (native KEM_ENCAP/KEM_DECAP) is the model of record.
 // ---------------------------------------------------------------------------
 // Maps to src/crypto.rs + src/proxy.rs. This is B1 of the assurance backlog
-// (docs/NLNET-PROPOSAL-AND-ROSENPASS-BACKLOG-2026-09-12.md) and the headline
-// NLnet deliverable: a formally-verified PQ handshake WITH a QKD hybrid.
+// (the assurance backlog) and the headline
+// assurance deliverable: a formally-verified PQ handshake WITH a QKD hybrid.
 //
 // Abstractions (symbolic, standard for a first model):
 //   ML-KEM-768 encapsulation  ->  public-key encryption  (PKE_ENC / PKE_DEC)

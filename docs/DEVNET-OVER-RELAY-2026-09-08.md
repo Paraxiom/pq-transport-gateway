@@ -127,7 +127,7 @@ the real port is never advertised at all.
   not long enough to see a ratchet boundary at 65,536 records or a memory trend.
 - **No faults injected.** No node killed, no partition, no relay restarted mid flight. Reconnect
   behaviour is therefore argued from design and from the reaper tests, not demonstrated here.
-- **Not production.** Nothing in this run touched Alice, Bob or Charlie. Per the activation plan
+- **Not production.** Nothing in this run touched the production validators. Per the activation plan
   nothing goes near a production validator before the coherence gadget fix has soaked, which is not
   before 2026-10-16.
 

@@ -2,7 +2,9 @@
 
 *Companion to `VERIFICATION-RESULTS-2026-09-12.md` (gateway handshake). Same tool (Verifpal 1.4.10, official release binary), same abstractions, same deliberately unambitious language. The relay is a different protocol from the gateway: its own six-input transcript (`relay_transcript`, which includes the client's Falcon vk), two directional keys (`derive_directional_key` with c2s/s2c labels), and no QKD leg.*
 
-**One-line summary.** As shipped, the relay authenticates the **server** to a pinned client and nothing else: the relay server accepts any client (no allow-list, no hello signature), so an attacker can always open a relay session as "the client" and the server-side keys of that session are its own. The pin is load-bearing: without it everything falls, and there is no QKD leg to fall back on. With a client-authenticated hello (the relay twin of the gateway's B6) every confidentiality and server-authentication query holds, and forward secrecy holds symbolically even when both long-term keys leak afterwards.
+**Update, same day:** the relay now ships with client authentication (wire `relay-2`, see *Next* item 1); the "as shipped" rows below describe `relay-1`, and the `client-auth` rows describe what ships now.
+
+**One-line summary.** As `relay-1` shipped, the relay authenticated the **server** to a pinned client and nothing else: the relay server accepts any client (no allow-list, no hello signature), so an attacker can always open a relay session as "the client" and the server-side keys of that session are its own. The pin is load-bearing: without it everything falls, and there is no QKD leg to fall back on. With a client-authenticated hello (the relay twin of the gateway's B6) every confidentiality and server-authentication query holds, and forward secrecy holds symbolically even when both long-term keys leak afterwards.
 
 ## Models
 
@@ -49,6 +51,6 @@ Say: *"The relay handshake is symbolically verified (Verifpal 1.4.10) for server
 Do not say: "mutually authenticated relay", "proven secure", or that an unpinned relay client is protected by anything.
 
 ## Next
-1. **B10**: implement relay client authentication (`relay.authorized_clients` allow-list + signed hello, mirrored from gateway v3 B6/B8 including the freshness guard), then re-run `clientauth` as the model of record.
-2. Report R3 upstream together with gateway F3 (same pattern, second protocol; B9).
+1. ~~**B10**: implement relay client authentication~~ **Done the same day (wire `relay-2`).** `src/relay.rs`: `ClientPolicy::Authorized(fingerprints)` on the server (`relay.authorized_clients`, `--client`), a signed and time-stamped `RelayHello`, and a replay guard (`src/replay.rs`, window 2 × 120 s) checked in the order allow-list → signature → freshness → first sight, before encapsulation. `ClientPolicy::AnyClient` (`relay.allow_any_client`, `--any-client`) is the explicit, WARN-logged opt-out. **`pqtg-relay-handshake-clientauth.vp` is now the model of the shipped relay**; `pqtg-relay-handshake.vp` documents `relay-1`. The replay guard is stateful and outside the symbolic model, so the `hello_sig` injectivity query stays FAIL by construction, as for the gateway (`CLIENTAUTH-RESULTS-2026-09-12.md`).
+2. Report R3 upstream together with gateway F3 (same pattern, second protocol; B9, drafted in `formal/upstream/`).
 3. Model the ratchet (`DirectionalCipher` epochs) separately; nothing here covers it.

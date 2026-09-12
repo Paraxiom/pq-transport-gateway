@@ -1,8 +1,8 @@
 // VARIANT nopin-leak-qkd: unpinned server_pk AND `knows public qkd_key` (no pin, no QKD leg)
 // ---------------------------------------------------------------------------
 // Maps to src/crypto.rs + src/proxy.rs::perform_handshake. This is B1 of the
-// assurance backlog (docs/NLNET-PROPOSAL-AND-ROSENPASS-BACKLOG-2026-09-12.md)
-// and the headline NLnet deliverable: a formally-verified PQ handshake WITH a
+// assurance backlog (the assurance backlog)
+// and the headline assurance deliverable: a formally-verified PQ handshake WITH a
 // QKD hybrid. Run with Verifpal 1.4.10; results and the change log are in
 // formal/VERIFICATION-RESULTS-2026-09-12.md.
 //

@@ -1,6 +1,6 @@
 # PQTG formal verification (B1)
 
-**Symbolic** model of the PQTG v2 handshake, in [Verifpal](https://verifpal.com). This is item **B1** of the assurance backlog (`docs/NLNET-PROPOSAL-AND-ROSENPASS-BACKLOG-2026-09-12.md`) and the headline **NLnet / NGI Zero** deliverable: a formally-verified post-quantum handshake *with* a QKD hybrid — a claim the free tools (Rosenpass, PQ-Noise) cannot make, because they have no QKD leg.
+**Symbolic** model of the PQTG v2 handshake, in [Verifpal](https://verifpal.com). This is item **B1** of the assurance backlog (`the assurance backlog`) and the headline assurance deliverable: a formally-verified post-quantum handshake *with* a QKD hybrid — a claim the free tools (Rosenpass, PQ-Noise) cannot make, because they have no QKD leg.
 
 **Status (2026-09-12): M1 done — the model has been run, with Verifpal 1.4.10.** Base model: all three queries hold (`c0c0a0`, unchanged from 2 to 3 sessions). The hybrid property holds in the "KEM broken, QKD saves it" direction; the "QKD broken, KEM saves it" direction exposes a real gap on the server side (no client authentication in the handshake, THREAT-MODEL L2) and a Verifpal artifact on the client side. Full results, traces, change log and findings: **`VERIFICATION-RESULTS-2026-09-12.md`**. Read it before quoting any of this.
 
@@ -81,10 +81,10 @@ The relay (`src/relay.rs`) is a different protocol from the gateway handshake: s
 
 | File | Role |
 |---|---|
-| `pqtg-relay-handshake.vp` | as shipped: pinned server, unauthenticated client |
+| `pqtg-relay-handshake.vp` | `relay-1` (superseded): pinned server, unauthenticated client |
 | `pqtg-relay-handshake-nopin.vp` | pin removed (`PinPolicy::Unpinned`) |
-| `pqtg-relay-handshake-clientauth.vp` | fix candidate: server allow-list + client-signed hello (backlog B10) |
+| `pqtg-relay-handshake-clientauth.vp` | **the shipped relay (`relay-2`)**: server allow-list + client-signed hello (B10, done) |
 | `pqtg-relay-handshake-fs.vp`, `-clientauth-fs.vp` | forward secrecy: long-term keys leak in phase 1 |
 | `RELAY-RESULTS-2026-09-12.md` | results, findings R1–R4, wording |
 
-Run: `verifpal verify formal/pqtg-relay-handshake.vp` (add `--sessions 1` or `--saturate`; `--result-code --quiet` for the compact verdict). Expected as shipped: `c1c1c0c0a0a1` at one session (server keys fall to an attacker acting as the client, R1; the honest client's keys and server authentication hold), `c1c1c1c1a0a1` at two (the extra failures are the same tool artefact as gateway F3). Client-authenticated: `c0c0c0c0a0a0` at one session, only hello replay failing at two.
+Run: `verifpal verify formal/pqtg-relay-handshake.vp` (add `--sessions 1` or `--saturate`; `--result-code --quiet` for the compact verdict). Expected for `relay-1`: `c1c1c0c0a0a1` at one session (server keys fall to an attacker acting as the client, R1; the honest client's keys and server authentication hold), `c1c1c1c1a0a1` at two (the extra failures are the same tool artefact as gateway F3). Shipped relay (`relay-2`, client-authenticated): `c0c0c0c0a0a0` at one session, only hello replay failing at two; the replay guard in `src/replay.rs` closes that operationally and is outside the symbolic model.

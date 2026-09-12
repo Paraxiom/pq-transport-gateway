@@ -1,7 +1,7 @@
 # PQTG v2 handshake — Verifpal verification results (2026-09-12)
 
 Milestone **M1** of the assurance backlog (B1 in
-`docs/NLNET-PROPOSAL-AND-ROSENPASS-BACKLOG-2026-09-12.md`): the symbolic model in
+`the assurance backlog`): the symbolic model in
 `formal/pqtg-handshake.vp` has now been **executed**, not just written. This
 document records the tool, the exact results, every change made to the model,
 and the findings, with the language kept deliberately unambitious.

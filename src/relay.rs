@@ -52,19 +52,22 @@
 //! at WARN on every handshake. The relay carries no QKD key, so without the pin
 //! there is no second leg to fall back on.
 //!
-//! # Client authentication: none yet
+//! # Client authentication
 //!
-//! The server accepts any `RelayHello`. The client's `falcon_vk` is carried,
-//! length-checked and bound into the transcript, but checked against nothing,
-//! and the hello is signed by nobody. Anyone who can reach a relay server port
-//! can open a post-quantum tunnel to its backend (Verifpal finding R1,
-//! `formal/RELAY-RESULTS-2026-09-12.md`). In the QuantumHarmony deployment the
-//! backend is a validator's p2p port and libp2p's `--reserved-only` peer check
-//! is the actual gate; the per-source connection cap and the handshake timeout
-//! bound what a stranger's handshake costs. For any other backend, treat the
-//! relay server port as an open door until backlog B10 lands: a server-side
-//! allow-list of client fingerprints plus a client-signed hello, which the
-//! `pqtg-relay-handshake-clientauth.vp` model shows closes it.
+//! Until `relay-2` the server accepted any `RelayHello`: the client's
+//! `falcon_vk` was bound into the transcript but checked against nothing, and
+//! the hello was signed by nobody, so anyone who could reach a relay server
+//! port could open a post-quantum tunnel to its backend (Verifpal finding R1,
+//! `formal/RELAY-RESULTS-2026-09-12.md`). Now the server holds an allow-list
+//! of client fingerprints (`ClientPolicy::Authorized`, the mirror of the
+//! client's pin) and the client signs a time-stamped hello with its identity
+//! key; the server checks allow-list, signature, freshness and a replay guard
+//! before it encapsulates. `ClientPolicy::AnyClient` is the explicit,
+//! WARN-logged opt-out for a backend that gates its own peers (QuantumHarmony
+//! validators do, via libp2p `--reserved-only`). The authenticated model
+//! (`formal/pqtg-relay-handshake-clientauth.vp`) passes every confidentiality
+//! and server-authentication query; the replay guard is a stateful measure the
+//! symbolic model does not express.
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -74,7 +77,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, info, warn};
@@ -84,14 +87,37 @@ use crate::crypto::{
     EphemeralKemKey, PqKeyExchange, FALCON_512_VK_LEN, ML_KEM_768_CT_LEN, ML_KEM_768_EK_LEN,
     SLH_DSA_SHAKE128F_VK_LEN,
 };
+use crate::replay::{ReplayGuard, Verdict};
 
 /// Relay wire version. Distinct from the gateway protocol's "2.0" so the two
-/// can never be confused by a peer that speaks only one of them.
-pub const RELAY_VERSION: &str = "relay-1";
+/// can never be confused by a peer that speaks only one of them. `relay-2`
+/// added the signed, time-stamped hello (client authentication, finding R1);
+/// a `relay-1` peer is refused with a version mismatch rather than accepted
+/// unauthenticated.
+pub const RELAY_VERSION: &str = "relay-2";
 
 /// Domain separator for the relay transcript. Keeps relay handshake signatures
 /// disjoint from gateway handshake signatures made with the same Falcon key.
 const RELAY_TRANSCRIPT_LABEL: &[u8] = b"PQTG-RELAY-TRANSCRIPT-v1\x00";
+
+/// Domain separator for the client's hello signature. Disjoint from the
+/// transcript label and from the gateway's `pqtg-client-hello-v3`.
+const RELAY_HELLO_LABEL: &[u8] = b"PQTG-RELAY-HELLO-v2\x00";
+
+/// Freshness window for the signed hello timestamp, either direction. A
+/// recorded hello is worthless once the window has passed; inside it the
+/// replay guard refuses a second sight. Relay peers are infrastructure with
+/// synchronised clocks, so two minutes is generous.
+const HELLO_MAX_SKEW_SECS: u64 = 120;
+
+/// The replay guard must remember a hello for the whole interval in which its
+/// timestamp is acceptable: twice the skew after first sight (see replay.rs).
+const HELLO_REPLAY_WINDOW: Duration = Duration::from_secs(2 * HELLO_MAX_SKEW_SECS);
+
+/// Replay cache capacity. Only signature-valid, in-window hellos from
+/// allow-listed clients are ever inserted, so it cannot be filled by a
+/// stranger; sized for a few hundred handshakes per second over the window.
+const HELLO_REPLAY_CACHE_ENTRIES: usize = 65_536;
 
 /// Domain separators for the two directional keys.
 const KDF_LABEL_C2S: &[u8] = b"PQTG-RELAY-KEY-c2s-v1\x00";
@@ -207,6 +233,79 @@ struct RelayHello {
     falcon_vk: Vec<u8>,
     /// SLH-DSA-Shake128f verification key, hash-based identity.
     slh_dsa_vk: Vec<u8>,
+    /// Client clock, seconds since the Unix epoch, under the signature. The
+    /// server refuses a hello more than `HELLO_MAX_SKEW_SECS` from its own.
+    timestamp: u64,
+    /// Falcon-512 signature by the client's identity key (the one `falcon_vk`
+    /// names) over `relay_hello_digest` of every field above. Proves the
+    /// sender holds the allow-listed key and binds THIS `kem_ek` to it, so an
+    /// on-path attacker cannot present an allow-listed client's public keys
+    /// with its own KEM key (Verifpal finding R1, backlog B10;
+    /// `formal/pqtg-relay-handshake-clientauth.vp`).
+    hello_sig: Vec<u8>,
+}
+
+/// Seconds since the Unix epoch. A clock before 1970 reads as 0, which fails
+/// the freshness check rather than passing it.
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// What `RelayHello::hello_sig` signs: every hello field except the signature,
+/// variable-length fields length-prefixed, under the relay hello label.
+fn relay_hello_digest(
+    client_random: &[u8; 32],
+    timestamp: u64,
+    kem_ek: &[u8],
+    falcon_vk: &[u8],
+    slh_dsa_vk: &[u8],
+) -> [u8; 32] {
+    let mut h = Sha3_256::new();
+    h.update(RELAY_HELLO_LABEL);
+    h.update(client_random);
+    h.update(timestamp.to_be_bytes());
+    for field in [kem_ek, falcon_vk, slh_dsa_vk] {
+        h.update((field.len() as u32).to_be_bytes());
+        h.update(field);
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&h.finalize());
+    out
+}
+
+impl RelayHello {
+    fn digest(&self) -> [u8; 32] {
+        relay_hello_digest(
+            &self.client_random,
+            self.timestamp,
+            &self.kem_ek,
+            &self.falcon_vk,
+            &self.slh_dsa_vk,
+        )
+    }
+
+    /// Client side: sign with the identity whose keys the hello carries.
+    fn sign(&mut self, identity: &PqKeyExchange) -> Result<()> {
+        if identity.falcon_pk_bytes() != self.falcon_vk.as_slice() {
+            return Err(anyhow!(
+                "relay hello falcon_vk does not match the signing identity"
+            ));
+        }
+        self.hello_sig = identity.sign_transcript(&self.digest())?;
+        Ok(())
+    }
+
+    /// Server side: does `hello_sig` verify under the hello's own `falcon_vk`?
+    /// Meaningful only after the allow-list has accepted that key.
+    fn verify_sig(&self) -> Result<bool> {
+        if self.hello_sig.is_empty() {
+            return Ok(false);
+        }
+        PqKeyExchange::verify_falcon(&self.digest(), &self.hello_sig, &self.falcon_vk)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -466,6 +565,16 @@ pub struct RelaySession {
     pub peer_falcon_vk: Vec<u8>,
 }
 
+// Debug without the ciphers: lets a `Result<RelaySession>` be unwrapped in
+// tests and logged, and never prints key material.
+impl std::fmt::Debug for RelaySession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelaySession")
+            .field("peer_falcon_vk_len", &self.peer_falcon_vk.len())
+            .finish_non_exhaustive()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Server identity pinning
 // ---------------------------------------------------------------------------
@@ -527,6 +636,22 @@ pub enum PinPolicy {
     Unpinned,
 }
 
+/// What a relay server does with the identity a client presents: the mirror
+/// image of `PinPolicy`. The allow-list entries are the same fingerprint type
+/// as the pin (`compute_identity_fingerprint` of the client's two keys, the
+/// value `--print-fingerprint` prints on the client).
+#[derive(Clone, Debug)]
+pub enum ClientPolicy {
+    /// Accept only clients whose fingerprint is in this list, and only with a
+    /// hello they signed. The only mode in which the backend is not exposed
+    /// to anyone who can reach the relay port (finding R1).
+    Authorized(Vec<ServerPin>),
+    /// Accept any client that signs its hello, and say so at WARN on every
+    /// handshake. For a backend that authenticates its peers itself, or a
+    /// bench. Never in front of a service that trusts the relay to gate it.
+    AnyClient,
+}
+
 // ---------------------------------------------------------------------------
 // Handshake
 // ---------------------------------------------------------------------------
@@ -541,13 +666,16 @@ pub async fn client_handshake(
     let kem = EphemeralKemKey::new().context("relay client: ML-KEM keygen")?;
     let client_random = random_bytes::<32>();
 
-    let hello = RelayHello {
+    let mut hello = RelayHello {
         version: RELAY_VERSION.to_string(),
         client_random,
         kem_ek: kem.ek_bytes.clone(),
         falcon_vk: identity.falcon_pk_bytes().to_vec(),
         slh_dsa_vk: identity.slh_dsa_pk_bytes().to_vec(),
+        timestamp: unix_now(),
+        hello_sig: Vec::new(),
     };
+    hello.sign(identity)?;
     write_len_prefixed(stream, &bincode::serialize(&hello)?).await?;
 
     let raw = read_len_prefixed(stream, MAX_HELLO_BYTES).await?;
@@ -623,10 +751,17 @@ pub async fn client_handshake(
     })
 }
 
-/// Server side of the relay handshake.
+/// Server side of the relay handshake. Admission runs in this order, all of it
+/// before anything is spent on the peer: wire version and field lengths, the
+/// client allow-list (finding R1), the hello signature (proof of possession,
+/// which binds this `kem_ek` to the presented identity), freshness of the
+/// signed timestamp, and first sight in the replay guard. Only then does the
+/// server encapsulate.
 pub async fn server_handshake(
     stream: &mut TcpStream,
     identity: &PqKeyExchange,
+    clients: &ClientPolicy,
+    guard: &Mutex<ReplayGuard>,
 ) -> Result<RelaySession> {
     let raw = read_len_prefixed(stream, MAX_HELLO_BYTES).await?;
     let hello: RelayHello = bincode::deserialize(&raw)?;
@@ -646,6 +781,57 @@ pub async fn server_handshake(
     }
     if hello.slh_dsa_vk.len() != SLH_DSA_SHAKE128F_VK_LEN {
         return Err(anyhow!("relay client SLH-DSA vk has the wrong length"));
+    }
+
+    // Allow-list first: a stranger costs one fingerprint hash, nothing more.
+    let presented = compute_identity_fingerprint(&hello.falcon_vk, &hello.slh_dsa_vk);
+    match clients {
+        ClientPolicy::Authorized(list) => {
+            if !list.iter().any(|p| p.as_bytes() == &presented) {
+                return Err(anyhow!(
+                    "relay client {} is not in the allow-list; refusing before encapsulation",
+                    format_fingerprint(&presented)
+                ));
+            }
+        }
+        ClientPolicy::AnyClient => warn!(
+            "relay server is OPEN to any client: accepting {} with no allow-list",
+            format_fingerprint(&presented)
+        ),
+    }
+    // Then proof of possession: the allow-list only proves the hello NAMES an
+    // allowed key; the signature proves the sender HOLDS it and chose this
+    // kem_ek.
+    if !hello.verify_sig()? {
+        return Err(anyhow!(
+            "relay hello signature does not verify under the presented falcon_vk"
+        ));
+    }
+    // Then freshness and first sight, so a recording is worthless.
+    let skew = hello.timestamp.abs_diff(unix_now());
+    if skew > HELLO_MAX_SKEW_SECS {
+        return Err(anyhow!(
+            "relay hello timestamp is {skew} s from server time (max {HELLO_MAX_SKEW_SECS} s): \
+             stale, future-dated, or a replay"
+        ));
+    }
+    {
+        let mut guard = guard.lock().unwrap_or_else(|p| p.into_inner());
+        match guard.check_and_insert(hello.client_random, Instant::now()) {
+            Verdict::Fresh => {}
+            Verdict::Replay => {
+                return Err(anyhow!(
+                "replayed relay hello: this client_random was already admitted inside the window"
+            ))
+            }
+            Verdict::Full => {
+                return Err(anyhow!(
+                    "relay hello replay cache full at {} entries; refusing rather than reopening \
+                     the replay window",
+                    guard.len()
+                ))
+            }
+        }
     }
 
     let (kem_ct, secret) = encapsulate_to(&hello.kem_ek)?;
@@ -824,16 +1010,30 @@ pub struct RelayServer {
     max_connections: usize,
     live: Arc<AtomicU64>,
     per_ip: Arc<Mutex<HashMap<IpAddr, u32>>>,
+    /// Which clients may open a tunnel (finding R1).
+    clients: Arc<ClientPolicy>,
+    /// Admitted hello identifiers inside the freshness window (replay guard).
+    guard: Arc<Mutex<ReplayGuard>>,
 }
 
 impl RelayServer {
-    pub fn new(identity: Arc<PqKeyExchange>, backend: SocketAddr, max_connections: usize) -> Self {
+    pub fn new(
+        identity: Arc<PqKeyExchange>,
+        backend: SocketAddr,
+        max_connections: usize,
+        clients: ClientPolicy,
+    ) -> Self {
         Self {
             identity,
             backend,
             max_connections,
             live: Arc::new(AtomicU64::new(0)),
             per_ip: Arc::new(Mutex::new(HashMap::new())),
+            clients: Arc::new(clients),
+            guard: Arc::new(Mutex::new(ReplayGuard::new(
+                HELLO_REPLAY_WINDOW,
+                HELLO_REPLAY_CACHE_ENTRIES,
+            ))),
         }
     }
 
@@ -852,6 +1052,15 @@ impl RelayServer {
             self.backend,
             ServerPin::of(&self.identity)
         );
+        match self.clients.as_ref() {
+            ClientPolicy::Authorized(list) => {
+                info!("relay accepts {} allow-listed client(s)", list.len())
+            }
+            ClientPolicy::AnyClient => warn!(
+                "relay accepts ANY client that signs its hello: the backend is reachable by \
+                 anyone who can reach this port"
+            ),
+        }
         loop {
             let (stream, peer) = match listener.accept().await {
                 Ok(v) => v,
@@ -886,6 +1095,8 @@ impl RelayServer {
 
             let identity = self.identity.clone();
             let backend = self.backend;
+            let clients = self.clients.clone();
+            let replay = self.guard.clone();
             self.live.fetch_add(1, Ordering::Relaxed);
             // The guard decrements both counters on drop, so the accounting is
             // correct even if the task below returns early or panics.
@@ -897,7 +1108,9 @@ impl RelayServer {
 
             tokio::spawn(async move {
                 let _guard = guard;
-                if let Err(e) = handle_inbound(stream, peer, identity, backend).await {
+                if let Err(e) =
+                    handle_inbound(stream, peer, identity, backend, clients, replay).await
+                {
                     debug!("relay connection from {peer} ended: {e}");
                 }
             });
@@ -910,20 +1123,24 @@ async fn handle_inbound(
     peer: SocketAddr,
     identity: Arc<PqKeyExchange>,
     backend: SocketAddr,
+    clients: Arc<ClientPolicy>,
+    guard: Arc<Mutex<ReplayGuard>>,
 ) -> Result<()> {
     configure_socket(&stream, "inbound");
-    let session =
-        match tokio::time::timeout(HANDSHAKE_TIMEOUT, server_handshake(&mut stream, &identity))
-            .await
-        {
-            Ok(r) => r?,
-            Err(_) => {
-                debug!(
+    let session = match tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        server_handshake(&mut stream, &identity, &clients, &guard),
+    )
+    .await
+    {
+        Ok(r) => r?,
+        Err(_) => {
+            debug!(
                 "relay: {peer} did not complete the handshake in {HANDSHAKE_TIMEOUT:?}, dropping"
             );
-                return Ok(());
-            }
-        };
+            return Ok(());
+        }
+    };
     let upstream = TcpStream::connect(backend)
         .await
         .with_context(|| format!("relay could not reach backend {backend}"))?;
@@ -1043,18 +1260,25 @@ mod tests {
     async fn spawn_relay_pair() -> Result<(SocketAddr, SocketAddr)> {
         let backend = spawn_echo().await?;
 
+        // Every end-to-end test runs pinned AND allow-listed: the client
+        // authenticates the server by its pin, the server authenticates the
+        // client by its fingerprint and signed hello. Nothing else is the
+        // configuration the relay is meant to run in.
+        let client_identity = Arc::new(PqKeyExchange::new()?);
         let server_identity = Arc::new(PqKeyExchange::new()?);
         let server_pin = ServerPin::of(&server_identity);
         let server_listener = TcpListener::bind("127.0.0.1:0").await?;
         let server_addr = server_listener.local_addr()?;
-        let server = RelayServer::new(server_identity, backend, 64);
+        let server = RelayServer::new(
+            server_identity,
+            backend,
+            64,
+            ClientPolicy::Authorized(vec![ServerPin::of(&client_identity)]),
+        );
         tokio::spawn(async move {
             let _ = server.serve(server_listener).await;
         });
 
-        // Every end-to-end test runs pinned: that is the only configuration
-        // in which the client authenticates the server.
-        let client_identity = Arc::new(PqKeyExchange::new()?);
         let client_listener = TcpListener::bind("127.0.0.1:0").await?;
         let client_addr = client_listener.local_addr()?;
         let client = RelayClient::new(client_identity, server_addr, PinPolicy::Require(server_pin));
@@ -1090,7 +1314,7 @@ mod tests {
         let server_pin = ServerPin::of(&server_identity);
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let server_addr = listener.local_addr().expect("addr");
-        let server = RelayServer::new(server_identity, backend, 8);
+        let server = RelayServer::new(server_identity, backend, 8, ClientPolicy::AnyClient);
         tokio::spawn(async move {
             let _ = server.serve(listener).await;
         });
@@ -1207,7 +1431,7 @@ mod tests {
         let identity = Arc::new(PqKeyExchange::new().expect("id"));
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
-        let server = RelayServer::new(identity, backend, 8);
+        let server = RelayServer::new(identity, backend, 8, ClientPolicy::AnyClient);
         tokio::spawn(async move {
             let _ = server.serve(listener).await;
         });
@@ -1220,6 +1444,8 @@ mod tests {
             kem_ek: vec![0u8; ML_KEM_768_EK_LEN],
             falcon_vk: vec![0u8; FALCON_512_VK_LEN],
             slh_dsa_vk: vec![0u8; SLH_DSA_SHAKE128F_VK_LEN],
+            timestamp: 0,
+            hello_sig: Vec::new(),
         };
         write_len_prefixed(&mut sock, &bincode::serialize(&bogus).unwrap())
             .await
@@ -1276,7 +1502,7 @@ mod tests {
         let impostor = Arc::new(PqKeyExchange::new().expect("impostor"));
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
-        let server = RelayServer::new(impostor, backend, 8);
+        let server = RelayServer::new(impostor, backend, 8, ClientPolicy::AnyClient);
         tokio::spawn(async move {
             let _ = server.serve(listener).await;
         });
@@ -1310,7 +1536,7 @@ mod tests {
         let server_identity = Arc::new(PqKeyExchange::new().expect("server"));
         let server_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let server_addr = server_listener.local_addr().expect("addr");
-        let server = RelayServer::new(server_identity, backend, 8);
+        let server = RelayServer::new(server_identity, backend, 8, ClientPolicy::AnyClient);
         tokio::spawn(async move {
             let _ = server.serve(server_listener).await;
         });
@@ -1343,7 +1569,7 @@ mod tests {
         let server_identity = Arc::new(PqKeyExchange::new().expect("server"));
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
-        let server = RelayServer::new(server_identity, backend, 8);
+        let server = RelayServer::new(server_identity, backend, 8, ClientPolicy::AnyClient);
         tokio::spawn(async move {
             let _ = server.serve(listener).await;
         });
@@ -1354,6 +1580,179 @@ mod tests {
         client_handshake(&mut upstream, &client_identity, PinPolicy::Unpinned)
             .await
             .expect("unpinned handshake completes");
+    }
+
+    // ---- client authentication (Verifpal R1, backlog B10) ----------------
+
+    /// Accept exactly one connection and run the server handshake on it with
+    /// the given client policy and replay guard. Returns the address to dial
+    /// and the handshake's outcome, so a test can assert on the server's
+    /// reason for refusing.
+    async fn accept_one(
+        identity: Arc<PqKeyExchange>,
+        clients: ClientPolicy,
+        guard: Arc<Mutex<ReplayGuard>>,
+    ) -> (SocketAddr, tokio::task::JoinHandle<Result<RelaySession>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let handle = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await?;
+            server_handshake(&mut s, &identity, &clients, &guard).await
+        });
+        (addr, handle)
+    }
+
+    fn fresh_guard() -> Arc<Mutex<ReplayGuard>> {
+        Arc::new(Mutex::new(ReplayGuard::new(HELLO_REPLAY_WINDOW, 16)))
+    }
+
+    /// A hello exactly as `client_handshake` would build it, for tests that
+    /// need to tamper with one before sending it.
+    fn signed_hello(identity: &PqKeyExchange, timestamp: u64) -> RelayHello {
+        let kem = EphemeralKemKey::new().expect("kem");
+        let mut hello = RelayHello {
+            version: RELAY_VERSION.to_string(),
+            client_random: random_bytes::<32>(),
+            kem_ek: kem.ek_bytes.clone(),
+            falcon_vk: identity.falcon_pk_bytes().to_vec(),
+            slh_dsa_vk: identity.slh_dsa_pk_bytes().to_vec(),
+            timestamp,
+            hello_sig: Vec::new(),
+        };
+        hello.sign(identity).expect("sign hello");
+        hello
+    }
+
+    async fn send_raw_hello(addr: SocketAddr, hello: &RelayHello) -> TcpStream {
+        let mut sock = TcpStream::connect(addr).await.expect("connect");
+        write_len_prefixed(&mut sock, &bincode::serialize(hello).unwrap())
+            .await
+            .expect("write hello");
+        sock
+    }
+
+    /// The R1 attack, refused at the door: a client the server was not told
+    /// about, presenting a perfectly well-formed, self-signed hello.
+    #[tokio::test]
+    async fn an_unauthorized_client_is_refused_before_encapsulation() {
+        let server_identity = Arc::new(PqKeyExchange::new().expect("server"));
+        let server_pin = ServerPin::of(&server_identity);
+        let allowed = PqKeyExchange::new().expect("allowed client");
+        let stranger = PqKeyExchange::new().expect("stranger");
+        let (addr, outcome) = accept_one(
+            server_identity,
+            ClientPolicy::Authorized(vec![ServerPin::of(&allowed)]),
+            fresh_guard(),
+        )
+        .await;
+
+        let mut sock = TcpStream::connect(addr).await.expect("connect");
+        // The stranger's own handshake fails (the server closes on it); what
+        // matters is the server's stated reason.
+        let _ = client_handshake(&mut sock, &stranger, PinPolicy::Require(server_pin)).await;
+        let err = outcome
+            .await
+            .expect("join")
+            .expect_err("stranger must be refused");
+        assert!(err.to_string().contains("allow-list"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn an_allow_listed_client_completes_the_handshake() {
+        let server_identity = Arc::new(PqKeyExchange::new().expect("server"));
+        let server_pin = ServerPin::of(&server_identity);
+        let client = PqKeyExchange::new().expect("client");
+        let (addr, outcome) = accept_one(
+            server_identity,
+            ClientPolicy::Authorized(vec![ServerPin::of(&client)]),
+            fresh_guard(),
+        )
+        .await;
+        let mut sock = TcpStream::connect(addr).await.expect("connect");
+        client_handshake(&mut sock, &client, PinPolicy::Require(server_pin))
+            .await
+            .expect("allow-listed client completes");
+        outcome.await.expect("join").expect("server side completes");
+    }
+
+    /// An attacker who knows an allow-listed client's PUBLIC keys presents them
+    /// with a hello signed by its own key: passes the allow-list, fails the
+    /// signature. (Without the signature this was the F1-shaped attack on the
+    /// relay: the server would have encapsulated to the attacker's KEM key.)
+    #[tokio::test]
+    async fn a_hello_signed_by_another_identity_is_refused() {
+        let server_identity = Arc::new(PqKeyExchange::new().expect("server"));
+        let victim = PqKeyExchange::new().expect("victim");
+        let attacker = PqKeyExchange::new().expect("attacker");
+        let (addr, outcome) = accept_one(
+            server_identity,
+            ClientPolicy::Authorized(vec![ServerPin::of(&victim)]),
+            fresh_guard(),
+        )
+        .await;
+
+        let mut hello = signed_hello(&victim, unix_now());
+        let attacker_kem = EphemeralKemKey::new().expect("kem");
+        hello.kem_ek = attacker_kem.ek_bytes.clone();
+        hello.hello_sig = attacker.sign_transcript(&hello.digest()).expect("sig");
+        let _sock = send_raw_hello(addr, &hello).await;
+        let err = outcome
+            .await
+            .expect("join")
+            .expect_err("forged hello must be refused");
+        assert!(err.to_string().contains("signature"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_stale_or_future_dated_hello_is_refused() {
+        for offset in [
+            -(HELLO_MAX_SKEW_SECS as i64) - 1,
+            HELLO_MAX_SKEW_SECS as i64 + 1,
+        ] {
+            let server_identity = Arc::new(PqKeyExchange::new().expect("server"));
+            let client = PqKeyExchange::new().expect("client");
+            let (addr, outcome) = accept_one(
+                server_identity,
+                ClientPolicy::Authorized(vec![ServerPin::of(&client)]),
+                fresh_guard(),
+            )
+            .await;
+            let ts = (unix_now() as i64 + offset) as u64;
+            let hello = signed_hello(&client, ts);
+            let _sock = send_raw_hello(addr, &hello).await;
+            let err = outcome
+                .await
+                .expect("join")
+                .expect_err("stale hello must be refused");
+            assert!(
+                err.to_string().contains("timestamp"),
+                "offset {offset}: got: {err}"
+            );
+        }
+    }
+
+    /// The replay Verifpal reported on the authenticated model: the same honest
+    /// hello presented twice. First sight is admitted, the recording is refused.
+    #[tokio::test]
+    async fn a_replayed_hello_is_refused() {
+        let server_identity = Arc::new(PqKeyExchange::new().expect("server"));
+        let client = PqKeyExchange::new().expect("client");
+        let guard = fresh_guard();
+        let policy = ClientPolicy::Authorized(vec![ServerPin::of(&client)]);
+        let hello = signed_hello(&client, unix_now());
+
+        let (addr, first) =
+            accept_one(server_identity.clone(), policy.clone(), guard.clone()).await;
+        let _s1 = send_raw_hello(addr, &hello).await;
+        first.await.expect("join").expect("first sight is admitted");
+
+        let (addr, second) = accept_one(server_identity, policy, guard).await;
+        let _s2 = send_raw_hello(addr, &hello).await;
+        let err = second
+            .await
+            .expect("join")
+            .expect_err("the recording must be refused");
+        assert!(err.to_string().contains("replayed"), "got: {err}");
     }
 
     #[tokio::test]
@@ -1515,9 +1914,11 @@ mod tests {
         let server_pin = ServerPin::of(&server_identity);
         let accepted = tokio::spawn(async move {
             let (mut s, _) = listener.accept().await.expect("accept encrypted");
-            let session = server_handshake(&mut s, &server_identity)
-                .await
-                .expect("server handshake");
+            let guard = Mutex::new(ReplayGuard::new(HELLO_REPLAY_WINDOW, 16));
+            let session =
+                server_handshake(&mut s, &server_identity, &ClientPolicy::AnyClient, &guard)
+                    .await
+                    .expect("server handshake");
             (s, session)
         });
 

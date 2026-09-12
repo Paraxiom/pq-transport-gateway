@@ -159,7 +159,7 @@ pattern under `knows public qkd_key` (`c1c0a0` at 1 session, `c1c1a0` at 2).
 protects the *client's* session key" beyond one session for this protocol
 shape. I assess the property as true and the 2-session verdict as a false
 attack, but the tool does not say so, and this document does not claim the tool
-said so. This is worth reporting upstream with `formal/repro/` attached.
+said so. Reported upstream as [symbolicsoft/verifpal#29](https://github.com/symbolicsoft/verifpal/issues/29) with `formal/repro/` linked.
 
 ## 4. Pin variants — what the guarded `[server_pk]` is buying
 
@@ -210,7 +210,7 @@ the attacker in this variant knows strictly more than in `pqtg-handshake-nopin.v
 proposes `server_pk=PUBKEY(nil) ...` and finds the attack; with `qkd_key` public
 it emits 94 proposals and never one that substitutes `server_pk`. **Read the
 `a0` in that file as a missed attack, not as a pass.** Upstream documents the
-engine as incomplete; this is an instance. Also worth reporting.
+engine as incomplete; this is an instance. Reported upstream as [symbolicsoft/verifpal#30](https://github.com/symbolicsoft/verifpal/issues/30).
 
 ## 5. Changes made to the model, and why each is still faithful to `src/`
 

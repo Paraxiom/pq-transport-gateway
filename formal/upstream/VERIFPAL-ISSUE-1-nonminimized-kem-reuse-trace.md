@@ -1,4 +1,6 @@
-# Draft issue for symbolicsoft/verifpal (not filed yet)
+# Filed upstream on 2026-09-12 as https://github.com/symbolicsoft/verifpal/issues/29
+
+*Body below is what was filed (the attachments section was replaced by links to this branch).*
 
 **Title:** Two-session confidentiality FAIL whose trace reuses one `KEM_ENCAP` randomness across incompatible substitutions; the tool itself marks it "not a minimized witness"
 

@@ -1,4 +1,6 @@
-# Draft issue for symbolicsoft/verifpal (not filed yet)
+# Filed upstream on 2026-09-12 as https://github.com/symbolicsoft/verifpal/issues/30
+
+*Body below is what was filed (the attachments section was replaced by links to this branch).*
 
 **Title:** Authentication attack found when a value is `knows private`, missed when the same value is `knows public` (non-monotone verdict)
 

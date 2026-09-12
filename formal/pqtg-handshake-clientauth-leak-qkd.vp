@@ -1,0 +1,55 @@
+// Variant of pqtg-handshake-clientauth.vp: the QKD key is PUBLIC (both sides),
+// i.e. the hybrid's QKD leg is broken and the KEM leg must carry the session.
+// This is the exact configuration in which the unauthenticated hello fell
+// (formal/pqtg-handshake-leak-qkd.vp, finding F1, session_key_s c1).
+// One-line diff from the base: `knows private qkd_key` -> `knows public qkd_key`.
+
+attacker[active]
+
+principal Server[
+    knows public qkd_key
+    knows private server_sk
+    server_pk = PUBKEY(server_sk)
+    generates server_random
+]
+
+principal Client[
+    knows public qkd_key
+    knows private client_sk
+    client_pk = PUBKEY(client_sk)
+    generates client_random
+    generates kem_sk
+    kem_ek = PUBKEY(kem_sk)
+    hello_sig = SIGN(client_sk, HASH(client_random, kem_ek))
+]
+
+Server -> Client: [server_pk]
+Client -> Server: [client_pk]
+Client -> Server: client_random, kem_ek, hello_sig
+
+principal Server[
+    _ = SIGNVERIF(client_pk, HASH(client_random, kem_ek), hello_sig)?
+    generates kem_r
+    kem_ss, kem_ct = KEM_ENCAP(kem_ek, kem_r)
+    transcript_s = HASH(client_random, server_random, kem_ek, server_pk, kem_ct)
+    transcript_sig = SIGN(server_sk, transcript_s)
+    mixed_s = HASH(qkd_key, kem_ss)
+    session_key_s = HASH(mixed_s, transcript_s)
+]
+
+Server -> Client: server_random, kem_ct, transcript_sig
+
+principal Client[
+    kem_ss_c = KEM_DECAP(kem_sk, kem_ct)
+    transcript_c = HASH(client_random, server_random, kem_ek, server_pk, kem_ct)
+    _ = SIGNVERIF(server_pk, transcript_c, transcript_sig)?
+    mixed_c = HASH(qkd_key, kem_ss_c)
+    session_key_c = HASH(mixed_c, transcript_c)
+]
+
+queries[
+    confidentiality? session_key_s
+    confidentiality? session_key_c
+    authentication? Server -> Client: transcript_sig
+    authentication? Client -> Server: hello_sig
+]

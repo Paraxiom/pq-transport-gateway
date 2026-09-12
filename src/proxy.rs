@@ -88,7 +88,7 @@ impl KeyMode {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ClientHelloV3 {
     pub version: String,
     pub client_random: [u8; 32],
@@ -102,6 +102,15 @@ pub struct ClientHelloV3 {
     /// True iff the client can run ETSI 014 `dec_keys` against a KME that
     /// shares keys with the server's KME. Drives QKD-vs-PQC negotiation.
     pub qkd_capable: bool,
+    /// Falcon-512 signature by the client's identity key (the one `falcon_vk`
+    /// names) over `crypto::client_hello_digest_v3` of every field above.
+    /// Proves the sender holds the allow-listed key and binds THIS `kem_ek` to
+    /// it, so an on-path attacker cannot present an authorized client's public
+    /// keys with its own KEM key and obtain the server's session key (Verifpal
+    /// finding F1, backlog B6; `formal/pqtg-handshake-clientauth.vp`). Verified
+    /// before any QKD key is allocated, and again inside `respond_v3` so the
+    /// type-state cannot produce a session from an unverified hello.
+    pub hello_sig: Vec<u8>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -123,6 +132,45 @@ pub struct ServerHelloV3 {
     pub master_sae_id: String,
     /// Bytes of QKD material mixed (0 in PqcOnly) — transcript-bound.
     pub qkd_key_len: u32,
+}
+
+impl ClientHelloV3 {
+    /// The digest `hello_sig` signs: every field except the signature itself.
+    pub fn digest(&self) -> [u8; 32] {
+        crate::crypto::client_hello_digest_v3(
+            &self.client_random,
+            &self.kem_ek,
+            &self.falcon_vk,
+            &self.slh_dsa_vk,
+            self.requested_key_size as u64,
+            self.client_sae_id.as_bytes(),
+            self.qkd_capable,
+        )
+    }
+
+    /// Client side: sign the hello with the identity whose keys it carries.
+    /// `identity.falcon_pk_bytes()` must equal `self.falcon_vk`; a signature by
+    /// any other key could never verify under `falcon_vk` on the server.
+    pub fn sign(&mut self, identity: &PqKeyExchange) -> Result<()> {
+        if identity.falcon_pk_bytes() != self.falcon_vk.as_slice() {
+            return Err(anyhow!(
+                "ClientHelloV3.falcon_vk does not match the signing identity"
+            ));
+        }
+        self.hello_sig = identity.sign_transcript(&self.digest())?;
+        Ok(())
+    }
+
+    /// Server side: does `hello_sig` verify under the hello's own `falcon_vk`?
+    /// The caller has already checked that `falcon_vk` is allow-listed; this is
+    /// the proof of possession that turns "names an authorized key" into "is
+    /// the authorized client, and this is its KEM key".
+    pub fn verify_hello_sig(&self) -> Result<bool> {
+        if self.hello_sig.is_empty() {
+            return Ok(false);
+        }
+        PqKeyExchange::verify_falcon(&self.digest(), &self.hello_sig, &self.falcon_vk)
+    }
 }
 
 /// Minimal prefix decode to pick the struct shape before full deserialization.
@@ -310,6 +358,14 @@ impl ServerHandshake<AwaitingHello> {
         qkd: Option<(String, Zeroizing<Vec<u8>>)>,
         master_sae_id: &str,
     ) -> Result<ServerHandshake<HelloAcceptedV3>> {
+        // Proof of possession before encapsulation. `handshake_v3` checks this
+        // earlier too (before the QKD allocation); repeating it here means the
+        // type-state itself cannot yield a session from an unverified hello.
+        if !client_hello.verify_hello_sig()? {
+            return Err(anyhow!(
+                "ClientHelloV3.hello_sig does not verify under falcon_vk; refusing to encapsulate"
+            ));
+        }
         let (kem_ciphertext, pqc_secret) = encapsulate_to(&client_hello.kem_ek)?;
         let server_random = random_bytes::<32>();
         let (key_mode, qkd_key_id, qkd_key_len, qkd_material) = match qkd {
@@ -571,6 +627,21 @@ impl ProxyServer {
             peer_addr,
         )?;
 
+        // ── Client proof of possession (Verifpal F1 / backlog B6) ───────────
+        // Before any QKD allocation. The allow-list proves the hello NAMES an
+        // authorized key; this proves the sender HOLDS it and bound this
+        // kem_ek to it. Without it an on-path attacker presents an authorized
+        // client's public keys with its own KEM key and obtains the server's
+        // session key, and any copy of the public keys can drain QKD material.
+        if !client_hello.verify_hello_sig()? {
+            audit::log_auth_failure(peer_addr, "ClientHelloV3.hello_sig invalid");
+            warn!(
+                "Rejected client {}: hello signature does not verify under its falcon_vk",
+                peer_addr
+            );
+            return Err(anyhow!("ClientHello signature invalid"));
+        }
+
         // ── QKD negotiation (spec §5) — after authorization, before transcript
         let want_qkd = client_hello.qkd_capable && !client_hello.client_sae_id.is_empty();
         let qkd = if want_qkd {
@@ -783,7 +854,7 @@ mod tests {
     // ── v3 (PROTOCOL-V3-QKD-KEYID.md) ────────────────────────────────────────
 
     fn v3_hello(client_kem: &EphemeralKemKey, client_id: &PqKeyExchange) -> ClientHelloV3 {
-        ClientHelloV3 {
+        let mut hello = ClientHelloV3 {
             version: PROTOCOL_VERSION_V3.to_string(),
             client_random: random_bytes::<32>(),
             kem_ek: client_kem.ek_bytes.clone(),
@@ -792,7 +863,10 @@ mod tests {
             requested_key_size: 32,
             client_sae_id: "sae-102".to_string(),
             qkd_capable: true,
-        }
+            hello_sig: Vec::new(),
+        };
+        hello.sign(client_id).expect("sign hello");
+        hello
     }
 
     /// Client-side v3 transcript reconstruction from wire data — what a real
@@ -948,6 +1022,111 @@ mod tests {
                 .unwrap(),
             "key_ID substitution MUST break the transcript signature"
         );
+    }
+
+    // ── client proof of possession (Verifpal F1 / backlog B6) ───────────────
+
+    /// The F1 attack, end to end: an on-path attacker takes an honest client's
+    /// hello and swaps in its own KEM key, hoping the server encapsulates to
+    /// it. Before hello_sig the server did exactly that
+    /// (formal/verifpal-output-leak-qkd.txt); now it refuses before
+    /// encapsulating (formal/verifpal-output-clientauth-leak-qkd.txt).
+    #[test]
+    fn v3_substituted_kem_ek_is_refused_before_encapsulation() {
+        let host_key = PqKeyExchange::new().unwrap();
+        let client_kem = EphemeralKemKey::new().unwrap();
+        let client_id = PqKeyExchange::new().unwrap();
+        let mut hello = v3_hello(&client_kem, &client_id);
+        assert!(hello.verify_hello_sig().unwrap(), "an honest hello verifies");
+
+        let attacker_kem = EphemeralKemKey::new().unwrap();
+        hello.kem_ek = attacker_kem.ek_bytes.clone();
+        assert!(
+            !hello.verify_hello_sig().unwrap(),
+            "a substituted kem_ek must break hello_sig"
+        );
+        assert!(
+            ServerHandshake::new()
+                .respond_v3(&hello, &host_key, None, "sae-101")
+                .is_err(),
+            "the server must not encapsulate to a KEM key the client did not sign"
+        );
+    }
+
+    #[test]
+    fn v3_unsigned_hello_is_refused() {
+        let host_key = PqKeyExchange::new().unwrap();
+        let client_kem = EphemeralKemKey::new().unwrap();
+        let client_id = PqKeyExchange::new().unwrap();
+        let mut hello = v3_hello(&client_kem, &client_id);
+        hello.hello_sig.clear();
+        assert!(!hello.verify_hello_sig().unwrap());
+        assert!(ServerHandshake::new()
+            .respond_v3(&hello, &host_key, None, "sae-101")
+            .is_err());
+    }
+
+    /// An attacker who knows an authorized client's PUBLIC keys but holds a
+    /// different private key: the hello names the authorized vk, the
+    /// signature is by the attacker's key. This is exactly what passes the
+    /// allow-list and must fail here.
+    #[test]
+    fn v3_hello_signed_by_another_identity_is_refused() {
+        let host_key = PqKeyExchange::new().unwrap();
+        let client_kem = EphemeralKemKey::new().unwrap();
+        let victim = PqKeyExchange::new().unwrap();
+        let attacker = PqKeyExchange::new().unwrap();
+        let mut hello = v3_hello(&client_kem, &victim);
+        hello.hello_sig = attacker.sign_transcript(&hello.digest()).unwrap();
+        assert!(!hello.verify_hello_sig().unwrap());
+        assert!(ServerHandshake::new()
+            .respond_v3(&hello, &host_key, None, "sae-101")
+            .is_err());
+        // The client-side helper also refuses to sign for a vk it does not hold.
+        assert!(hello.sign(&attacker).is_err());
+    }
+
+    /// Every hello field is under the signature, so none can be altered in
+    /// flight (the KEM key is the one that matters for F1; the SAE-ID and
+    /// capability flag are what a downgrade-minded attacker would touch).
+    #[test]
+    fn v3_hello_signature_covers_every_field() {
+        let client_kem = EphemeralKemKey::new().unwrap();
+        let client_id = PqKeyExchange::new().unwrap();
+        let honest = v3_hello(&client_kem, &client_id);
+        assert!(honest.verify_hello_sig().unwrap());
+
+        let mutations: Vec<(&str, Box<dyn Fn(&mut ClientHelloV3)>)> = vec![
+            ("client_random", Box::new(|h| h.client_random[0] ^= 1)),
+            ("kem_ek", Box::new(|h| h.kem_ek[0] ^= 1)),
+            ("slh_dsa_vk", Box::new(|h| h.slh_dsa_vk[0] ^= 1)),
+            ("requested_key_size", Box::new(|h| h.requested_key_size += 1)),
+            ("client_sae_id", Box::new(|h| h.client_sae_id.push('x'))),
+            ("qkd_capable", Box::new(|h| h.qkd_capable = !h.qkd_capable)),
+        ];
+        for (field, mutate) in mutations {
+            let mut h = honest.clone();
+            mutate(&mut h);
+            assert!(
+                !h.verify_hello_sig().unwrap(),
+                "{field} must be covered by hello_sig"
+            );
+        }
+    }
+
+    /// The signed hello still round-trips the wire and keeps the version
+    /// peek working (the signature is the last field; bincode encodes the
+    /// version string first).
+    #[test]
+    fn v3_signed_hello_round_trips_and_still_peeks() {
+        let client_kem = EphemeralKemKey::new().unwrap();
+        let client_id = PqKeyExchange::new().unwrap();
+        let hello = v3_hello(&client_kem, &client_id);
+        let bytes = bincode::serialize(&hello).unwrap();
+        let back: ClientHelloV3 = bincode::deserialize(&bytes).unwrap();
+        assert!(back.verify_hello_sig().unwrap());
+        let peek: VersionPeek = bincode::deserialize(&bytes).unwrap();
+        assert!(peek.version.starts_with("3."));
     }
 
     /// The version peek picks the right struct shape for both wire versions.

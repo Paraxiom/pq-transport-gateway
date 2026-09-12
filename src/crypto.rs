@@ -41,6 +41,8 @@ const KEY_MIXING_LABEL: &[u8] = b"pqtg-key-mixing-v2";
 const SESSION_KDF_LABEL_V3: &[u8] = b"pqtg-session-v3";
 const KEY_MIXING_LABEL_V3: &[u8] = b"pqtg-key-mixing-v3";
 const TRANSCRIPT_LABEL_V3: &[u8] = b"pqtg-transcript-v3";
+/// Domain of the client's hello signature (backlog B6, Verifpal finding F1).
+const CLIENT_HELLO_LABEL_V3: &[u8] = b"pqtg-client-hello-v3";
 
 // ── Algorithm-specific byte lengths (FIPS 203/205, Falcon submission) ────────
 //
@@ -363,6 +365,48 @@ pub fn transcript_hash_v3(
     h.update((master_sae_id.len() as u32).to_be_bytes());
     h.update(master_sae_id);
     h.update(qkd_key_len.to_be_bytes());
+    let digest = h.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
+/// v3 ClientHello digest, signed by the client's Falcon-512 identity key as
+/// `ClientHelloV3.hello_sig`. Covers every hello field except the signature
+/// itself, variable-length fields length-prefixed, under its own label so it
+/// can never collide with a transcript.
+///
+/// Why it exists: the allow-list only proves a hello NAMES an authorized key.
+/// Without a signature, an on-path attacker presents an authorized client's
+/// public keys with its own ML-KEM key, the server encapsulates to it, and in
+/// the pure post-quantum path the server's session key is the attacker's
+/// (Verifpal finding F1, `formal/VERIFICATION-RESULTS-2026-09-12.md`). Signing
+/// the hello binds `kem_ek` to the key the server trusts; the authenticated
+/// model closes F1 in both hybrid directions
+/// (`formal/CLIENTAUTH-RESULTS-2026-09-12.md`).
+#[allow(clippy::too_many_arguments)]
+pub fn client_hello_digest_v3(
+    client_random: &[u8; 32],
+    kem_ek: &[u8],
+    falcon_vk: &[u8],
+    slh_dsa_vk: &[u8],
+    requested_key_size: u64,
+    client_sae_id: &[u8],
+    qkd_capable: bool,
+) -> [u8; 32] {
+    let mut h = Sha3_256::new();
+    h.update(CLIENT_HELLO_LABEL_V3);
+    h.update(client_random);
+    h.update((kem_ek.len() as u32).to_be_bytes());
+    h.update(kem_ek);
+    h.update((falcon_vk.len() as u32).to_be_bytes());
+    h.update(falcon_vk);
+    h.update((slh_dsa_vk.len() as u32).to_be_bytes());
+    h.update(slh_dsa_vk);
+    h.update(requested_key_size.to_be_bytes());
+    h.update((client_sae_id.len() as u32).to_be_bytes());
+    h.update(client_sae_id);
+    h.update([u8::from(qkd_capable)]);
     let digest = h.finalize();
     let mut out = [0u8; 32];
     out.copy_from_slice(&digest);

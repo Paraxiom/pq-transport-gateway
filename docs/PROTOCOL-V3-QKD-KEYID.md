@@ -84,6 +84,13 @@ link; it negotiates **PQC-only** (§5).
 +    /// True iff the client can run ETSI 014 `dec_keys` against a KME that
 +    /// shares keys with the server's KME. Drives QKD-vs-PQC negotiation.
 +    pub qkd_capable: bool,
++    /// Falcon-512 signature by the client's identity key (the one falcon_vk
++    /// names) over SHA3-256("pqtg-client-hello-v3" ‖ client_random ‖ len‖kem_ek
++    /// ‖ len‖falcon_vk ‖ len‖slh_dsa_vk ‖ requested_key_size_be_u64
++    /// ‖ len‖client_sae_id ‖ qkd_capable_byte). Proof of possession of the
++    /// allow-listed key, and binds THIS kem_ek to it (2026-09-12, closes
++    /// Verifpal finding F1; formal/CLIENTAUTH-RESULTS-2026-09-12.md).
++    pub hello_sig: Vec<u8>,
  }
 
  pub struct ServerHello {
@@ -168,9 +175,10 @@ makes that decision tamper-evident.
 
 ```
 client                              PQTG (master SAE 101)            KMS (via mTLS shim)
-  │ ClientHello{v3, client_sae_id=102, qkd_capable=true, …}          │
+  │ ClientHello{v3, client_sae_id=102, qkd_capable=true, hello_sig, …}│
   ├─────────────────────────────────►│                              │
   │                                   │ authorize(falcon_vk,slh_dsa_vk)
+  │                                   │ verify hello_sig under falcon_vk (F1)
   │                                   │ status(102) stored_key_count>0│
   │                                   ├─ enc_keys(slave=102) ────────►│
   │                                   │◄── {key_ID, key_bytes} ───────┤
@@ -206,6 +214,22 @@ PqcOnly is identical minus the `enc_keys`/`dec_keys` calls and with
 - **Downgrade.** Signed `key_mode` + client-side "refuse PqcOnly" policy.
 - **DoS.** `enc_keys` runs only *after* authorization (as in v2), so an
   unauthorized peer still cannot make the server consume KMS keys.
+- **Client KEM-key binding (2026-09-12).** Authorization alone proves the hello
+  *names* an authorized key. `hello_sig` proves the sender *holds* it and bound
+  this `kem_ek` to it; the server verifies it after authorization and before
+  `enc_keys` / encapsulation, and `respond_v3` re-checks it so the type-state
+  cannot yield a session from an unverified hello. Without it an on-path
+  attacker presents an authorized client's public keys with its own KEM key
+  and, in PqcOnly, obtains the server's session key (Verifpal F1). The
+  authenticated model passes both hybrid directions
+  (`formal/CLIENTAUTH-RESULTS-2026-09-12.md`).
+- **Hello replay (open, B8).** The hello is one-shot: the server contributes
+  no nonce before accepting it, so a recorded honest hello is accepted again.
+  No secrecy impact (only the honest client can decapsulate), but each replay
+  costs the server one `enc_keys` allocation and one encapsulation. Closing it
+  needs recipient-generated context (a server nonce in a first flight, or a
+  bounded `(falcon_vk, client_random)` replay cache within the handshake
+  window).
 
 ---
 

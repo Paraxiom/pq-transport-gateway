@@ -1,0 +1,21 @@
+──────────────────────────────────────────────────
+  ◆ Verifpal 1.4.10 · https://verifpal.com
+──────────────────────────────────────────────────
+ Verifpal ◆ Verification initiated for 'pqtg-relay-handshake-clientauth-fs.vp' at 10:13:02 AM.
+     Info ● Analyzing 2 parallel sessions per principal; per-session values and principals are suffixed #2.
+     Info ● Attacker is configured as active.
+     Info ● Running at phase 0.
+     Info ● Running at phase 1.
+
+──────────────────────────────────────────────────
+ Verifpal ◆ Verification completed for 'pqtg-relay-handshake-clientauth-fs.vp' at 10:13:02 AM in 221ms.
+
+     Pass ✓ confidentiality? key_s2c_s  [search exhausted at 2 sessions]
+     Pass ✓ confidentiality? key_c2s_s  [search exhausted at 2 sessions]
+     Pass ✓ confidentiality? key_c2s_c  [search exhausted at 2 sessions]
+     Pass ✓ confidentiality? key_s2c_c  [search exhausted at 2 sessions]
+     Pass ✓ authentication? Server -> Client: transcript_sig  [search exhausted at 2 sessions]
+
+──────────────────────────────────────────────────
+     Pass ✓ All 5 queries pass.
+ Verifpal ◆ Thank you for using Verifpal.

@@ -1,0 +1,59 @@
+Verifpal 1.4.10 - https://verifpal.com
+ Verifpal * Verification initiated for 'signed-kem-unauth-ek.vp' at 07:33:42 AM.
+     Info . Attacker is configured as active.
+     Info . Running at phase 0.
+     FAIL x confidentiality? k_s (Analysis 4)
+
+--------------------------------------------------
+ Verifpal * Verification completed for 'signed-kem-unauth-ek.vp' at 07:33:42 AM in 4ms.
+
+     FAIL x confidentiality? k_s
+            Attack trace:
+            | 1. Attacker constructs PUBKEY(nil).
+            | 2. Attacker replaces ek (sent by Client to Server) with PUBKEY(nil). (ek was PUBKEY(dk))
+            | 3. Attacker observes KEM_ENCAP(PUBKEY(nil), r)|2 on the wire.
+            | 4. Attacker opens KEM_ENCAP(PUBKEY(nil), r)|2 with nil, obtaining KEM_ENCAP(PUBKEY(nil), r)|1.
+            | 5. Attacker constructs HASH(KEM_ENCAP(PUBKEY(nil), r)|1).
+            > k_s (HASH(KEM_ENCAP(PUBKEY(nil), r)|1)) is obtained by Attacker.
+     PASS + confidentiality? k_c  [search exhausted at 1 session]
+
+--------------------------------------------------
+     FAIL x 1 of 2 queries failed.
+ Verifpal * Thank you for using Verifpal.
+
+=================== --sessions 2 (default) ===================
+Verifpal 1.4.10 - https://verifpal.com
+ Verifpal * Verification initiated for 'signed-kem-unauth-ek.vp' at 07:33:42 AM.
+     Info . Analyzing 2 parallel sessions per principal; per-session values and principals are suffixed #2.
+     Info . Attacker is configured as active.
+     Info . Running at phase 0.
+     FAIL x confidentiality? k_s (Analysis 6)
+     FAIL x confidentiality? k_c (Analysis 8)
+
+--------------------------------------------------
+ Verifpal * Verification completed for 'signed-kem-unauth-ek.vp' at 07:33:42 AM in 44ms.
+
+     FAIL x confidentiality? k_s
+            Attack trace:
+            | 1. Attacker constructs PUBKEY(nil).
+            | 2. Attacker replaces ek (sent by Client to Server) with PUBKEY(nil). (ek was PUBKEY(dk))
+            | 3. Attacker observes KEM_ENCAP(PUBKEY(nil), r)|2 on the wire.
+            | 4. Attacker opens KEM_ENCAP(PUBKEY(nil), r)|2 with nil, obtaining KEM_ENCAP(PUBKEY(nil), r)|1.
+            | 5. Attacker constructs HASH(KEM_ENCAP(PUBKEY(nil), r)|1).
+            > k_s (HASH(KEM_ENCAP(PUBKEY(nil), r)|1)) is obtained by Attacker.
+     FAIL x confidentiality? k_c
+            Attack trace:
+            | 1. During Server's run (phase 0), attacker constructs PUBKEY(nil).
+            | 2. Attacker replaces ek#2 (sent by Client#2 to Server#2) with PUBKEY(nil). (ek#2 was PUBKEY(dk#2))
+            | 3. During Server's run (phase 0), attacker observes PUBKEY(dk) on the wire.
+            | 4. During Server's run (phase 0), attacker observes KEM_ENCAP(PUBKEY(nil), r)|2 on the wire.
+            | 5. During Server's run (phase 0), attacker opens KEM_ENCAP(PUBKEY(nil), r)|2 with nil, obtaining r.
+            | 6. During Client's run (phase 0), attacker constructs KEM_ENCAP(PUBKEY(dk), r)|1.
+            | 7. During Client's run (phase 0), attacker constructs HASH(KEM_ENCAP(PUBKEY(dk), r)|1).
+            | Note: these are the substitutions the search recorded; no subset of them was confirmed to reproduce the violation on its own, so this trace is not a minimized witness.
+            > k_c (HASH(KEM_ENCAP(PUBKEY(dk), r)|1)) is obtained by Attacker.
+
+--------------------------------------------------
+     FAIL x 2 of 2 queries failed.
+ Verifpal * Thank you for using Verifpal.
+--- result codes: sessions1=c1c0 sessions2=c1c1

@@ -1,0 +1,48 @@
+Verifpal 1.4.10 - https://verifpal.com
+ Verifpal * Verification initiated for 'signed-dh-unauth-ek.vp' at 07:33:42 AM.
+     Info . Attacker is configured as active.
+     Info . Running at phase 0.
+     FAIL x confidentiality? k_s (Analysis 4)
+
+--------------------------------------------------
+ Verifpal * Verification completed for 'signed-dh-unauth-ek.vp' at 07:33:42 AM in 3ms.
+
+     FAIL x confidentiality? k_s
+            Attack trace:
+            | 1. Attacker constructs PUBKEY(nil).
+            | 2. Attacker replaces ek (sent by Client to Server) with PUBKEY(nil). (ek was PUBKEY(dk))
+            | 3. Attacker observes gr on the wire.
+            | 4. Attacker constructs DH_KEX(gr, nil).
+            | 5. Attacker constructs HASH(DH_KEX(gr, nil)).
+            > k_s (HASH(DH_KEX(PUBKEY(nil), r))) is obtained by Attacker.
+     PASS + confidentiality? k_c  [search exhausted at 1 session]
+
+--------------------------------------------------
+     FAIL x 1 of 2 queries failed.
+ Verifpal * Thank you for using Verifpal.
+
+=================== --sessions 2 (default) ===================
+Verifpal 1.4.10 - https://verifpal.com
+ Verifpal * Verification initiated for 'signed-dh-unauth-ek.vp' at 07:33:42 AM.
+     Info . Analyzing 2 parallel sessions per principal; per-session values and principals are suffixed #2.
+     Info . Attacker is configured as active.
+     Info . Running at phase 0.
+     FAIL x confidentiality? k_s (Analysis 6)
+
+--------------------------------------------------
+ Verifpal * Verification completed for 'signed-dh-unauth-ek.vp' at 07:33:42 AM in 12ms.
+
+     FAIL x confidentiality? k_s
+            Attack trace:
+            | 1. Attacker constructs PUBKEY(nil).
+            | 2. Attacker replaces ek (sent by Client to Server) with PUBKEY(nil). (ek was PUBKEY(dk))
+            | 3. Attacker observes gr on the wire.
+            | 4. Attacker constructs DH_KEX(gr, nil).
+            | 5. Attacker constructs HASH(DH_KEX(gr, nil)).
+            > k_s (HASH(DH_KEX(PUBKEY(nil), r))) is obtained by Attacker.
+     PASS + confidentiality? k_c  [search exhausted at 2 sessions]
+
+--------------------------------------------------
+     FAIL x 1 of 2 queries failed.
+ Verifpal * Thank you for using Verifpal.
+--- result codes: sessions1=c1c0 sessions2=c1c0

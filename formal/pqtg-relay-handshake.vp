@@ -1,0 +1,83 @@
+// PQTG relay handshake — symbolic model (Verifpal 1.4.10, active attacker)
+// ---------------------------------------------------------------------------
+// Maps to src/relay.rs: client_handshake / server_handshake, relay_transcript,
+// derive_directional_key. A DIFFERENT protocol from the gateway handshake in
+// formal/pqtg-handshake.vp: its own transcript (six inputs, including the
+// client's Falcon vk), two directional keys, and NO QKD leg. Results and the
+// findings are in formal/RELAY-RESULTS-2026-09-12.md.
+//
+// Abstractions:
+//   ML-KEM-768 encaps/decaps        -> KEM_ENCAP / KEM_DECAP (native KEM)
+//   Falcon-512                      -> SIGN / SIGNVERIF
+//   SHA3-256 transcript and KDF     -> HASH. Verifpal HASH takes at most five
+//       arguments and relay_transcript has six, so the transcript is nested:
+//       HASH(HASH(client_random, server_random, kem_ek), kem_ct, client_pk,
+//       server_pk). Symbolically equivalent (an ideal hash of an ideal hash).
+//   directional labels (c2s, s2c)   -> public constants label_c2s / label_s2c
+//   server identity pin (ServerPin) -> guarded delivery [server_pk]: the relay
+//       client holds the server's fingerprint out of band (relay.pin / --pin,
+//       enforced since 2026-09-12) and refuses any other key BEFORE SIGNVERIF.
+//   client identity                 -> client_pk is carried in RelayHello
+//       (falcon_vk) exactly as the code does: sent on the wire, signed by
+//       nobody, checked against nothing. The server has no allow-list for
+//       relay clients and the hello carries no signature. This model states
+//       that as it is; pqtg-relay-handshake-clientauth.vp models the fix.
+//   slh_dsa_vk, version             -> omitted (public constants)
+//
+// What the queries ask:
+//   confidentiality of the four directional keys (two per side), server
+//   authentication to the client, client authentication to the server.
+
+attacker[active]
+
+principal Server[
+    knows public label_c2s, label_s2c
+    knows private server_sk
+    server_pk = PUBKEY(server_sk)
+    generates server_random
+]
+
+principal Client[
+    knows public label_c2s, label_s2c
+    knows private client_sk
+    client_pk = PUBKEY(client_sk)
+    generates client_random
+    generates kem_sk
+    kem_ek = PUBKEY(kem_sk)
+]
+
+// The pin: authentic server identity, out of band.
+Server -> Client: [server_pk]
+
+// RelayHello { client_random, kem_ek, falcon_vk, slh_dsa_vk }
+Client -> Server: client_random, kem_ek, client_pk
+
+principal Server[
+    generates kem_r
+    kem_ss, kem_ct = KEM_ENCAP(kem_ek, kem_r)
+    transcript_s = HASH(HASH(client_random, server_random, kem_ek), kem_ct, client_pk, server_pk)
+    transcript_sig = SIGN(server_sk, transcript_s)
+    key_s2c_s = HASH(label_s2c, kem_ss, transcript_s)     // server sends on s2c
+    key_c2s_s = HASH(label_c2s, kem_ss, transcript_s)     // server receives on c2s
+]
+
+// RelayServerHello { server_random, falcon_vk, slh_dsa_vk, kem_ciphertext, transcript_sig }
+// (the wire falcon_vk is redundant under the pin; see the nopin variant)
+Server -> Client: server_random, kem_ct, transcript_sig
+
+principal Client[
+    kem_ss_c = KEM_DECAP(kem_sk, kem_ct)
+    transcript_c = HASH(HASH(client_random, server_random, kem_ek), kem_ct, client_pk, server_pk)
+    _ = SIGNVERIF(server_pk, transcript_c, transcript_sig)?
+    key_c2s_c = HASH(label_c2s, kem_ss_c, transcript_c)   // client sends on c2s
+    key_s2c_c = HASH(label_s2c, kem_ss_c, transcript_c)   // client receives on s2c
+]
+
+queries[
+    confidentiality? key_s2c_s
+    confidentiality? key_c2s_s
+    confidentiality? key_c2s_c
+    confidentiality? key_s2c_c
+    authentication? Server -> Client: transcript_sig
+    authentication? Client -> Server: kem_ek
+]

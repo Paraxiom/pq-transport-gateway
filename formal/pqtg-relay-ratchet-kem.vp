@@ -1,0 +1,77 @@
+// PQTG relay record layer with KEM re-injection (relay-3, backlog B11)
+// ---------------------------------------------------------------------------
+// pqtg-relay-ratchet.vp plus the relay-3 step: before the boundary into epoch 2
+// the receiver has OFFERed a fresh ML-KEM key inside the sequenced, authenticated
+// reverse-direction stream (modelled as guarded delivery, which is what an
+// AEAD record under an authenticated session provides); at the boundary the
+// sender COMMITs an encapsulation to it inside the last record of epoch 1
+// (sealed under k1), and both sides mix the shared secret into k2:
+//
+//   k2 = HASH(lbl, k1, e2, ss2)      (code: SHA3(RATCHET_LABEL_v2 ‖ k1 ‖ 2 ‖ len ‖ ss))
+//
+// The epoch 0 -> 1 step stays hash-only here, to show both behaviours in one
+// run. Queries as before, plus authentication of the commit.
+
+attacker[active]
+
+principal Client[
+    knows public lbl, e1, e2, n0, n1, n1c, n2
+    generates dk
+    ek = PUBKEY(dk)
+    generates m0, m1, m2
+    generates r2
+]
+
+principal Server[
+    knows public lbl, e1, e2, n0, n1, n1c, n2
+    generates r
+    generates dk2
+    ek2 = PUBKEY(dk2)
+]
+
+Client -> Server: [ek]
+
+principal Server[
+    ss, ct = KEM_ENCAP(ek, r)
+    k0 = HASH(lbl, ss)
+    k1 = HASH(lbl, k0, e1)
+]
+
+Server -> Client: [ct]
+
+// The receiver's OFFER for the direction it receives on, carried in its own
+// sending direction's authenticated stream.
+Server -> Client: [ek2]
+
+principal Client[
+    ss_c = KEM_DECAP(dk, ct)
+    k0_c = HASH(lbl, ss_c)
+    k1_c = HASH(lbl, k0_c, e1)
+    c0 = AEAD_ENC(k0_c, n0, m0, nil)
+    c1 = AEAD_ENC(k1_c, n1, m1, nil)
+    ss2, ct2 = KEM_ENCAP(ek2, r2)
+    commit = AEAD_ENC(k1_c, n1c, ct2, nil)
+    k2_c = HASH(lbl, k1_c, e2, ss2)
+    c2 = AEAD_ENC(k2_c, n2, m2, nil)
+]
+
+Client -> Server: c0, c1, commit, c2
+
+principal Server[
+    m0_s = AEAD_DEC(k0, n0, c0, nil)?
+    m1_s = AEAD_DEC(k1, n1, c1, nil)?
+    ct2_s = AEAD_DEC(k1, n1c, commit, nil)?
+    ss2_s = KEM_DECAP(dk2, ct2_s)
+    k2 = HASH(lbl, k1, e2, ss2_s)
+    m2_s = AEAD_DEC(k2, n2, c2, nil)?
+]
+
+queries[
+    confidentiality? m0
+    confidentiality? m1
+    confidentiality? m2
+    authentication? Client -> Server: c0
+    authentication? Client -> Server: c1
+    authentication? Client -> Server: commit
+    authentication? Client -> Server: c2
+]

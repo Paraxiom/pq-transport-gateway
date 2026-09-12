@@ -1,0 +1,57 @@
+Verifpal 1.4.10 - https://verifpal.com
+ Verifpal * Verification initiated for 'signed-pke-unauth-ek.vp' at 07:33:42 AM.
+     Info . Attacker is configured as active.
+     Info . Running at phase 0.
+     FAIL x confidentiality? k_s (Analysis 4)
+
+--------------------------------------------------
+ Verifpal * Verification completed for 'signed-pke-unauth-ek.vp' at 07:33:42 AM in 3ms.
+
+     FAIL x confidentiality? k_s
+            Attack trace:
+            | 1. Attacker constructs PUBKEY(nil).
+            | 2. Attacker replaces ek (sent by Client to Server) with PUBKEY(nil). (ek was PUBKEY(dk))
+            | 3. Attacker observes PKE_ENC(PUBKEY(nil), ss) on the wire.
+            | 4. Attacker opens PKE_ENC(PUBKEY(nil), ss) with nil, obtaining ss.
+            | 5. Attacker constructs k_s.
+            > k_s (HASH(ss)) is obtained by Attacker.
+     PASS + confidentiality? k_c  [search exhausted at 1 session]
+
+--------------------------------------------------
+     FAIL x 1 of 2 queries failed.
+ Verifpal * Thank you for using Verifpal.
+
+=================== --sessions 2 (default) ===================
+Verifpal 1.4.10 - https://verifpal.com
+ Verifpal * Verification initiated for 'signed-pke-unauth-ek.vp' at 07:33:42 AM.
+     Info . Analyzing 2 parallel sessions per principal; per-session values and principals are suffixed #2.
+     Info . Attacker is configured as active.
+     Info . Running at phase 0.
+     FAIL x confidentiality? k_s (Analysis 6)
+     FAIL x confidentiality? k_c (Analysis 8)
+
+--------------------------------------------------
+ Verifpal * Verification completed for 'signed-pke-unauth-ek.vp' at 07:33:42 AM in 12ms.
+
+     FAIL x confidentiality? k_s
+            Attack trace:
+            | 1. Attacker constructs PUBKEY(nil).
+            | 2. Attacker replaces ek (sent by Client to Server) with PUBKEY(nil). (ek was PUBKEY(dk))
+            | 3. Attacker observes PKE_ENC(PUBKEY(nil), ss) on the wire.
+            | 4. Attacker opens PKE_ENC(PUBKEY(nil), ss) with nil, obtaining ss.
+            | 5. Attacker constructs k_s.
+            > k_s (HASH(ss)) is obtained by Attacker.
+     FAIL x confidentiality? k_c
+            Attack trace:
+            | 1. During Server's run (phase 0), attacker constructs PUBKEY(nil).
+            | 2. Attacker replaces ek#2 (sent by Client#2 to Server#2) with PUBKEY(nil). (ek#2 was PUBKEY(dk#2))
+            | 3. During Server's run (phase 0), attacker observes PKE_ENC(PUBKEY(nil), ss) on the wire.
+            | 4. During Server's run (phase 0), attacker opens PKE_ENC(PUBKEY(nil), ss) with nil, obtaining ss.
+            | 5. During Server's run (phase 0), attacker constructs k_s.
+            | Note: these are the substitutions the search recorded; no subset of them was confirmed to reproduce the violation on its own, so this trace is not a minimized witness.
+            > k_c (k_s) is obtained by Attacker.
+
+--------------------------------------------------
+     FAIL x 2 of 2 queries failed.
+ Verifpal * Thank you for using Verifpal.
+--- result codes: sessions1=c1c0 sessions2=c1c1

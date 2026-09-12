@@ -140,7 +140,11 @@ const CHUNK_BYTES: usize = 64 * 1024;
 /// At 64 KiB records this is a rekey roughly every 4 GiB in one direction,
 /// which on a validator link is hours rather than seconds. The point is not
 /// nonce exhaustion, which a 64-bit counter makes unreachable, but bounding how
-/// much traffic a single compromised key exposes.
+/// much EARLIER traffic a key recovered later exposes: the ratchet is one-way,
+/// so epoch N's key does not yield the epochs before it. It does yield every
+/// epoch after it, because the chain carries no fresh entropy; a compromised
+/// epoch key exposes the rest of that connection
+/// (`formal/RATCHET-RESULTS-2026-09-12.md`, T2 and T3).
 const REKEY_EVERY_RECORDS: u64 = 65_536;
 
 /// Domain separator for the ratchet step.
@@ -434,8 +438,11 @@ where
 /// driven by a counter they already agree on.
 ///
 /// The ratchet is one-way (`SHA3-256` of the previous key), so a key recovered
-/// in epoch N does not yield epoch N-1. Nonces carry the epoch in their top
-/// four bytes, so a counter that restarts each epoch can never repeat a nonce.
+/// in epoch N does not yield epoch N-1; it does yield N+1 and later, since
+/// nothing fresh enters the chain (symbolically checked, both directions of
+/// that claim, in `formal/pqtg-relay-ratchet*.vp`). Nonces carry the epoch in
+/// their top four bytes, so a counter that restarts each epoch can never repeat
+/// a nonce under the same key.
 pub struct DirectionalCipher {
     cipher: aes_gcm::Aes256Gcm,
     /// Current epoch key, retained to derive the next one.

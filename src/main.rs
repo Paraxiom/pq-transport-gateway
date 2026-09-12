@@ -13,6 +13,8 @@ mod config;
 mod crypto;
 mod proxy;
 mod qkd_client;
+mod relay;
+mod replay;
 
 use config::Config;
 use proxy::ProxyServer;
@@ -43,8 +45,27 @@ async fn main() -> Result<()> {
     let config = Arc::new(config);
     info!("Loaded configuration from {}", config_path);
 
+    // Standalone relay: a drop-in post-quantum sidecar in front of any TCP
+    // service, with no ETSI-014 gateway. It binds no proxy port and never calls
+    // a QKD vendor, so a chain can put it in front of validator or RPC traffic
+    // without running (or configuring) the gateway half at all.
+    if config.relay.is_enabled() && config.relay.standalone {
+        info!("PQTG relay standalone mode (no ETSI-014 gateway)");
+        spawn_relay(config.clone())?;
+        // Park forever; the relay runs in its own task.
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+        }
+    }
+
     audit::init(&config.security.audit_log)?;
     audit::log_startup(&config);
+
+    // Relay mode runs alongside the ETSI-014 gateway, not instead of it. A
+    // deployment can front QKD key delivery, relay arbitrary TCP, or both.
+    if config.relay.is_enabled() {
+        spawn_relay(config.clone())?;
+    }
 
     let proxy = ProxyServer::new(config.clone()).await?;
     let listener = TcpListener::bind(&config.proxy.listen).await?;
@@ -73,6 +94,77 @@ async fn main() -> Result<()> {
             }
         }
     }
+}
+
+/// Start the post-quantum relay in whichever mode the config selects.
+///
+/// The relay uses the SAME appliance identity as the gateway, so a client that
+/// has pinned this appliance's fingerprint recognises it on either path. The
+/// config was validated at load, so the unwraps below cannot fire.
+fn spawn_relay(config: Arc<Config>) -> Result<()> {
+    use crate::crypto::PqKeyExchange;
+    use crate::relay::{RelayClient, RelayServer};
+
+    let identity = Arc::new(
+        PqKeyExchange::load_if_present(&config.security.proxy_private_key)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "relay is enabled but there is no persisted identity at {}. \
+                 Run --generate-keys first: a relay that regenerates its identity \
+                 on every restart cannot be pinned by its peers.",
+                config.security.proxy_private_key
+            )
+        })?,
+    );
+
+    let listen = config.relay.listen.expect("validated at config load");
+
+    match config.relay.mode.as_str() {
+        "server" => {
+            let backend = config.relay.backend.expect("validated at config load");
+            let max = config.relay.max_connections;
+            // Validated at config load too; parsed again here so the policy
+            // handed to the server is the one the operator wrote.
+            let clients = config.relay.client_policy()?;
+            tokio::spawn(async move {
+                let listener = match TcpListener::bind(listen).await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        error!("relay could not bind {listen}: {e}");
+                        return;
+                    }
+                };
+                let server = RelayServer::new(identity, backend, max, clients);
+                if let Err(e) = server.serve(listener).await {
+                    error!("relay server exited: {e}");
+                }
+            });
+            info!("relay: server mode, {listen} -> {backend}");
+        }
+        "client" => {
+            let remote = config.relay.remote.expect("validated at config load");
+            // Validated at config load too, but parse again here so the policy
+            // handed to the client is the one the operator wrote, not a default.
+            let policy = config.relay.pin_policy()?;
+            tokio::spawn(async move {
+                let listener = match TcpListener::bind(listen).await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        error!("relay client could not bind {listen}: {e}");
+                        return;
+                    }
+                };
+                let client = RelayClient::new(identity, remote, policy);
+                if let Err(e) = client.serve(listener).await {
+                    error!("relay client exited: {e}");
+                }
+            });
+            info!("relay: client mode, {listen} -> {remote}");
+        }
+        other => anyhow::bail!(
+            "unreachable relay mode {other}: config validation should have caught this"
+        ),
+    }
+    Ok(())
 }
 
 /// Print the identity fingerprint for vk pinning (issue #2).
@@ -113,11 +205,20 @@ fn generate_proxy_keys() -> Result<()> {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
-    let key_path = "/etc/pq-qkd-proxy/proxy.key";
-    let cert_path = "/etc/pq-qkd-proxy/proxy.pub";
-    let auth_keys_path = "/etc/pq-qkd-proxy/authorized_keys";
+    // Respect PQTG_IDENTITY_KEY so the appliance can be provisioned without root
+    // (the loader already honours it). generate-keys used to hardcode /etc, so a
+    // non-root deploy could never create an identity — a real deployment bug for
+    // a drop-in sidecar. The directory of the key path is created below.
+    let key_path = std::env::var("PQTG_IDENTITY_KEY")
+        .unwrap_or_else(|_| "/etc/pq-qkd-proxy/proxy.key".to_string());
+    let base_dir = Path::new(&key_path)
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "/etc/pq-qkd-proxy".to_string());
+    let cert_path = format!("{base_dir}/proxy.pub");
+    let auth_keys_path = format!("{base_dir}/authorized_keys");
 
-    if Path::new(key_path).exists() {
+    if Path::new(&key_path).exists() {
         return Err(anyhow::anyhow!(
             "Identity already exists at {}; refusing to overwrite. \
              Delete the file explicitly to force rotation (this invalidates \
@@ -131,29 +232,29 @@ fn generate_proxy_keys() -> Result<()> {
     let kex = PqKeyExchange::new()?;
 
     // Persist signing + verification keys (issue #3).
-    fs::create_dir_all("/etc/pq-qkd-proxy")?;
-    kex.save(key_path)?;
+    fs::create_dir_all(&base_dir)?;
+    kex.save(&key_path)?;
 
     // Public bundle for distribution to clients (for vk pinning, issue #2).
     let mut public_bundle = Vec::with_capacity(929);
     public_bundle.extend_from_slice(kex.falcon_pk_bytes());
     public_bundle.extend_from_slice(kex.slh_dsa_pk_bytes());
-    fs::write(cert_path, &public_bundle)?;
-    let mut perms = fs::metadata(cert_path)?.permissions();
+    fs::write(&cert_path, &public_bundle)?;
+    let mut perms = fs::metadata(&cert_path)?.permissions();
     perms.set_mode(0o644);
-    fs::set_permissions(cert_path, perms)?;
+    fs::set_permissions(&cert_path, perms)?;
 
-    if !Path::new(auth_keys_path).exists() {
+    if !Path::new(&auth_keys_path).exists() {
         let template = r#"# PQTG Authorized Keys
 # Format: algorithm base64(falcon_vk(897) || slh_dsa_shake128f_vk(32)) permissions comment
 #
 # Example:
 # falcon512+slh-dsa-shake128f <base64-encoded-public-keys> perm=read,write client@example.com
 "#;
-        fs::write(auth_keys_path, template)?;
-        let mut perms = fs::metadata(auth_keys_path)?.permissions();
+        fs::write(&auth_keys_path, template)?;
+        let mut perms = fs::metadata(&auth_keys_path)?.permissions();
         perms.set_mode(0o600);
-        fs::set_permissions(auth_keys_path, perms)?;
+        fs::set_permissions(&auth_keys_path, perms)?;
     }
 
     println!("Identity (signing + verify):   {}", key_path);

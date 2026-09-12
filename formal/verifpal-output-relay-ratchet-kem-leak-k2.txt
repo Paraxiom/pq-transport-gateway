@@ -1,0 +1,29 @@
+──────────────────────────────────────────────────
+  ◆ Verifpal 1.4.10 · https://verifpal.com
+──────────────────────────────────────────────────
+ Verifpal ◆ Verification initiated for 'pqtg-relay-ratchet-kem-leak-k2.vp' at 01:26:09 PM.
+     Info ● Analyzing 2 parallel sessions per principal; per-session values and principals are suffixed #2.
+     Info ● Attacker is configured as active.
+     Info ● Running at phase 0.
+     Info ● Running at phase 1.
+     Fail ✗ confidentiality? m2 (Analysis 291)
+
+──────────────────────────────────────────────────
+ Verifpal ◆ Verification completed for 'pqtg-relay-ratchet-kem-leak-k2.vp' at 01:26:09 PM in 53ms.
+
+     Pass ✓ confidentiality? m0  [search exhausted at 2 sessions]
+     Pass ✓ confidentiality? m1  [search exhausted at 2 sessions]
+     Fail ✗ confidentiality? m2
+            ╭─ Attack trace:
+            │ 1. Attacker observes c2 on the wire.
+            │ 2. Attacker is handed k2 by a leaks declaration.
+            │ 3. Attacker opens c2 with k2_c, n2, obtaining m2.
+            ╰▸ m2 (m2) is obtained by Attacker.
+     Pass ✓ authentication? Client -> Server: c0  [search exhausted at 2 sessions]
+     Pass ✓ authentication? Client -> Server: c1  [search exhausted at 2 sessions]
+     Pass ✓ authentication? Client -> Server: commit  [search exhausted at 2 sessions]
+     Pass ✓ authentication? Client -> Server: c2  [search exhausted at 2 sessions]
+
+──────────────────────────────────────────────────
+     Fail ✗ 1 of 7 queries failed.
+ Verifpal ◆ Thank you for using Verifpal.

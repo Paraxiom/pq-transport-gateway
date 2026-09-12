@@ -1,0 +1,18 @@
+// Same shape with PKE: server picks ss and encrypts it.
+attacker[active]
+principal Server[ knows private ssk
+  spk = PUBKEY(ssk) ]
+principal Client[ generates dk
+  ek = PUBKEY(dk) ]
+Server -> Client: [spk]
+Client -> Server: ek
+principal Server[ generates ss
+  ct = PKE_ENC(ek, ss)
+  sig = SIGN(ssk, HASH(ek, ct))
+  k_s = HASH(ss) ]
+Server -> Client: ct, sig
+principal Client[ ss_c = PKE_DEC(dk, ct)
+  _ = SIGNVERIF(spk, HASH(ek, ct), sig)?
+  k_c = HASH(ss_c) ]
+queries[ confidentiality? k_s
+  confidentiality? k_c ]

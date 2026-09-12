@@ -1,0 +1,19 @@
+// Same shape with signed ephemeral DH (server-side ephemeral, signed with ek bound).
+attacker[active]
+principal Server[ knows private ssk
+  spk = PUBKEY(ssk) ]
+principal Client[ generates dk
+  ek = PUBKEY(dk) ]
+Server -> Client: [spk]
+Client -> Server: ek
+principal Server[ generates r
+  gr = PUBKEY(r)
+  ss = DH_KEX(ek, r)
+  sig = SIGN(ssk, HASH(ek, gr))
+  k_s = HASH(ss) ]
+Server -> Client: gr, sig
+principal Client[ ss_c = DH_KEX(gr, dk)
+  _ = SIGNVERIF(spk, HASH(ek, gr), sig)?
+  k_c = HASH(ss_c) ]
+queries[ confidentiality? k_s
+  confidentiality? k_c ]

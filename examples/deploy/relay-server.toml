@@ -1,0 +1,34 @@
+[proxy]
+listen = "127.0.0.1:18443"
+max_connections = 100
+connection_timeout = 30
+allowed_sources = []
+
+[qkd]
+vendor_api = "https://localhost:443"
+api_version = "1.0"
+key_timeout = 5
+max_key_size = 1048576
+
+[security]
+pq_algorithm = "falcon512"
+sig_algorithm = "sphincsplus"
+authorized_keys = "/etc/pq-qkd-proxy/authorized_keys"
+proxy_private_key = "/etc/pq-qkd-proxy/proxy.key"
+proxy_certificate = "/etc/pq-qkd-proxy/proxy.pub"
+
+[relay]
+standalone = true
+enabled = true
+mode = "server"
+listen = "0.0.0.0:9443"
+backend = "127.0.0.1:9500"
+max_connections = 256
+# Relay clients allowed to open a tunnel to `backend`, by identity fingerprint
+# (the value `pq-qkd-proxy --print-fingerprint` / `relay_wan fingerprint` prints
+# on each client). Required: a relay server that accepts any client is an open
+# door to its backend (Verifpal finding R1). `allow_any_client = true` is the
+# explicit, WARN-logged opt-out. Replace these example values.
+authorized_clients = [
+  "SHA3-256:gMxqqFUE1Nbsc7ay2+UrV4+3ZGYUl0jlm4s05WDa4zQ",
+]

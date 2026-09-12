@@ -1,0 +1,8 @@
+# Known-answer test vectors are SHA3-256 outputs over byte patterns that are
+# themselves written in the same file. High-entropy hex by construction, and
+# containing no key material, they trip generic secret detectors
+# (GitGuardian incident on commit cf43769, 2026-09-12, a false positive).
+version: 2
+secret:
+  ignored-paths:
+    - tests/vectors/**

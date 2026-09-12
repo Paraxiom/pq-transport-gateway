@@ -1,0 +1,92 @@
+──────────────────────────────────────────────────
+  ◆ Verifpal 1.4.10 · https://verifpal.com
+──────────────────────────────────────────────────
+ Verifpal ◆ Verification initiated for 'pqtg-relay-handshake.vp' at 10:12:11 AM.
+     Info ● Analyzing 2 parallel sessions per principal; per-session values and principals are suffixed #2.
+     Info ● Attacker is configured as active.
+     Info ● Running at phase 0.
+     Fail ✗ confidentiality? key_s2c_s (Analysis 6)
+     Fail ✗ confidentiality? key_c2s_s (Analysis 6)
+     Fail ✗ authentication? Client -> Server: kem_ek (Analysis 6)
+     Fail ✗ confidentiality? key_c2s_c (Analysis 22)
+     Fail ✗ confidentiality? key_s2c_c (Analysis 22)
+
+──────────────────────────────────────────────────
+ Verifpal ◆ Verification completed for 'pqtg-relay-handshake.vp' at 10:12:12 AM in 494ms.
+
+     Fail ✗ confidentiality? key_s2c_s
+            ╭─ Attack trace:
+            │ 1. Attacker constructs PUBKEY(nil).
+            │ 2. Attacker replaces kem_ek (sent by Client to Server) with PUBKEY(nil). (kem_ek was PUBKEY(kem_sk))
+            │ 3. Attacker observes KEM_ENCAP(PUBKEY(nil), kem_r)|2 on the wire.
+            │ 4. Attacker opens KEM_ENCAP(PUBKEY(nil), kem_r)|2 with nil, obtaining KEM_ENCAP(PUBKEY(nil), kem_r)|1.
+            │ 5. Attacker observes client_random on the wire.
+            │ 6. Attacker observes server_random on the wire.
+            │ 7. Attacker constructs HASH(client_random, server_random, PUBKEY(nil)).
+            │ 8. Attacker observes client_pk on the wire.
+            │ 9. Attacker observes server_pk on the wire.
+            │ 10. Attacker constructs HASH(HASH(client_random, server_random, PUBKEY(nil)), KEM_ENCAP(PUBKEY(nil), kem_r)|2, client_pk, server_pk).
+            │ 11. Attacker constructs HASH(label_s2c, KEM_ENCAP(PUBKEY(nil), kem_r)|1, HASH(HASH(client_random, server_random, PUBKEY(nil)), KEM_ENCAP(PUBKEY(nil), kem_r)|2, client_pk, server_pk)).
+            ╰▸ key_s2c_s (HASH(label_s2c, KEM_ENCAP(PUBKEY(nil), kem_r)|1, HASH(HASH(client_random, server_random, PUBKEY(nil)), KEM_ENCAP(PUBKEY(nil), kem_r)|2, client_pk, server_pk))) is obtained by Attacker.
+     Fail ✗ confidentiality? key_c2s_s
+            ╭─ Attack trace:
+            │ 1. Attacker constructs PUBKEY(nil).
+            │ 2. Attacker replaces kem_ek (sent by Client to Server) with PUBKEY(nil). (kem_ek was PUBKEY(kem_sk))
+            │ 3. Attacker observes KEM_ENCAP(PUBKEY(nil), kem_r)|2 on the wire.
+            │ 4. Attacker opens KEM_ENCAP(PUBKEY(nil), kem_r)|2 with nil, obtaining KEM_ENCAP(PUBKEY(nil), kem_r)|1.
+            │ 5. Attacker observes client_random on the wire.
+            │ 6. Attacker observes server_random on the wire.
+            │ 7. Attacker constructs HASH(client_random, server_random, PUBKEY(nil)).
+            │ 8. Attacker observes client_pk on the wire.
+            │ 9. Attacker observes server_pk on the wire.
+            │ 10. Attacker constructs HASH(HASH(client_random, server_random, PUBKEY(nil)), KEM_ENCAP(PUBKEY(nil), kem_r)|2, client_pk, server_pk).
+            │ 11. Attacker constructs HASH(label_c2s, KEM_ENCAP(PUBKEY(nil), kem_r)|1, HASH(HASH(client_random, server_random, PUBKEY(nil)), KEM_ENCAP(PUBKEY(nil), kem_r)|2, client_pk, server_pk)).
+            ╰▸ key_c2s_s (HASH(label_c2s, KEM_ENCAP(PUBKEY(nil), kem_r)|1, HASH(HASH(client_random, server_random, PUBKEY(nil)), KEM_ENCAP(PUBKEY(nil), kem_r)|2, client_pk, server_pk))) is obtained by Attacker.
+     Fail ✗ confidentiality? key_c2s_c
+            ╭─ Attack trace:
+            │ 1. During Server's run (phase 0), attacker constructs PUBKEY(nil).
+            │ 2. Attacker replaces client_pk#2, client_random#2, kem_ek#2 (sent by Client#2 to Server#2) with PUBKEY(nil), nil, PUBKEY(nil). (client_pk#2 was PUBKEY(client_sk); kem_ek#2 was PUBKEY(kem_sk#2))
+            │ 3. During Server's run (phase 0), attacker observes PUBKEY(kem_sk) on the wire.
+            │ 4. During Server's run (phase 0), attacker observes KEM_ENCAP(PUBKEY(nil), kem_r)|2 on the wire.
+            │ 5. During Server's run (phase 0), attacker opens KEM_ENCAP(PUBKEY(nil), kem_r)|2 with nil, obtaining kem_r.
+            │ 6. During Client's run (phase 0), attacker constructs KEM_ENCAP(PUBKEY(kem_sk), kem_r)|1.
+            │ 7. During Server's run (phase 0), attacker observes client_random on the wire.
+            │ 8. During Server's run (phase 0), attacker observes server_random on the wire.
+            │ 9. During Server's run (phase 0), attacker constructs HASH(client_random, server_random, PUBKEY(kem_sk)).
+            │ 10. During Server's run (phase 0), attacker observes KEM_ENCAP(PUBKEY(kem_sk), kem_r)|2 on the wire.
+            │ 11. During Server's run (phase 0), attacker observes PUBKEY(client_sk) on the wire.
+            │ 12. During Server's run (phase 0), attacker observes server_pk on the wire.
+            │ 13. During Server's run (phase 0), attacker constructs HASH(HASH(client_random, server_random, PUBKEY(kem_sk)), KEM_ENCAP(PUBKEY(kem_sk), kem_r)|2, PUBKEY(client_sk), server_pk).
+            │ 14. During Client's run (phase 0), attacker constructs HASH(label_c2s, KEM_ENCAP(PUBKEY(kem_sk), kem_r)|1, HASH(HASH(client_random, server_random, PUBKEY(kem_sk)), KEM_ENCAP(PUBKEY(kem_sk), kem_r)|2, PUBKEY(client_sk), server_pk)).
+            │ Note: these are the substitutions the search recorded; no subset of them was confirmed to reproduce the violation on its own, so this trace is not a minimized witness.
+            ╰▸ key_c2s_c (HASH(label_c2s, KEM_ENCAP(PUBKEY(kem_sk), kem_r)|1, HASH(HASH(client_random, server_random, PUBKEY(kem_sk)), KEM_ENCAP(PUBKEY(kem_sk), kem_r)|2, PUBKEY(client_sk), server_pk))) is obtained by Attacker.
+     Fail ✗ confidentiality? key_s2c_c
+            ╭─ Attack trace:
+            │ 1. During Server's run (phase 0), attacker constructs PUBKEY(nil).
+            │ 2. Attacker replaces client_pk#2, client_random#2, kem_ek#2 (sent by Client#2 to Server#2) with PUBKEY(nil), nil, PUBKEY(nil). (client_pk#2 was PUBKEY(client_sk); kem_ek#2 was PUBKEY(kem_sk#2))
+            │ 3. During Server's run (phase 0), attacker observes PUBKEY(kem_sk) on the wire.
+            │ 4. During Server's run (phase 0), attacker observes KEM_ENCAP(PUBKEY(nil), kem_r)|2 on the wire.
+            │ 5. During Server's run (phase 0), attacker opens KEM_ENCAP(PUBKEY(nil), kem_r)|2 with nil, obtaining kem_r.
+            │ 6. During Client's run (phase 0), attacker constructs KEM_ENCAP(PUBKEY(kem_sk), kem_r)|1.
+            │ 7. During Server's run (phase 0), attacker observes client_random on the wire.
+            │ 8. During Server's run (phase 0), attacker observes server_random on the wire.
+            │ 9. During Server's run (phase 0), attacker constructs HASH(client_random, server_random, PUBKEY(kem_sk)).
+            │ 10. During Server's run (phase 0), attacker observes KEM_ENCAP(PUBKEY(kem_sk), kem_r)|2 on the wire.
+            │ 11. During Server's run (phase 0), attacker observes PUBKEY(client_sk) on the wire.
+            │ 12. During Server's run (phase 0), attacker observes server_pk on the wire.
+            │ 13. During Server's run (phase 0), attacker constructs HASH(HASH(client_random, server_random, PUBKEY(kem_sk)), KEM_ENCAP(PUBKEY(kem_sk), kem_r)|2, PUBKEY(client_sk), server_pk).
+            │ 14. During Client's run (phase 0), attacker constructs HASH(label_s2c, KEM_ENCAP(PUBKEY(kem_sk), kem_r)|1, HASH(HASH(client_random, server_random, PUBKEY(kem_sk)), KEM_ENCAP(PUBKEY(kem_sk), kem_r)|2, PUBKEY(client_sk), server_pk)).
+            │ Note: these are the substitutions the search recorded; no subset of them was confirmed to reproduce the violation on its own, so this trace is not a minimized witness.
+            ╰▸ key_s2c_c (HASH(label_s2c, KEM_ENCAP(PUBKEY(kem_sk), kem_r)|1, HASH(HASH(client_random, server_random, PUBKEY(kem_sk)), KEM_ENCAP(PUBKEY(kem_sk), kem_r)|2, PUBKEY(client_sk), server_pk))) is obtained by Attacker.
+     Pass ✓ authentication? Server -> Client: transcript_sig  [search exhausted at 2 sessions]
+     Fail ✗ authentication? Client -> Server: kem_ek
+            ╭─ Attack trace:
+            │ 1. Attacker constructs PUBKEY(nil).
+            │ 2. Attacker replaces kem_ek (sent by Client to Server) with PUBKEY(nil). (kem_ek was PUBKEY(kem_sk))
+            │ 3. Attacker observes KEM_ENCAP(PUBKEY(nil), kem_r)|2 on the wire.
+            │ 4. Attacker opens KEM_ENCAP(PUBKEY(nil), kem_r)|2 with nil, obtaining KEM_ENCAP(PUBKEY(nil), kem_r)|1.
+            ╰▸ kem_ek (PUBKEY(nil)), sent by Attacker and not by Client, is successfully used in KEM_ENCAP(kem_ek, kem_r)|1 within Server's state.
+
+──────────────────────────────────────────────────
+     Fail ✗ 5 of 6 queries failed.
+ Verifpal ◆ Thank you for using Verifpal.

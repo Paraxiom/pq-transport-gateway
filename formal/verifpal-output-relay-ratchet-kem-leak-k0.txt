@@ -1,0 +1,36 @@
+──────────────────────────────────────────────────
+  ◆ Verifpal 1.4.10 · https://verifpal.com
+──────────────────────────────────────────────────
+ Verifpal ◆ Verification initiated for 'pqtg-relay-ratchet-kem-leak-k0.vp' at 01:26:08 PM.
+     Info ● Analyzing 2 parallel sessions per principal; per-session values and principals are suffixed #2.
+     Info ● Attacker is configured as active.
+     Info ● Running at phase 0.
+     Info ● Running at phase 1.
+     Fail ✗ confidentiality? m0 (Analysis 291)
+     Fail ✗ confidentiality? m1 (Analysis 291)
+
+──────────────────────────────────────────────────
+ Verifpal ◆ Verification completed for 'pqtg-relay-ratchet-kem-leak-k0.vp' at 01:26:09 PM in 59ms.
+
+     Fail ✗ confidentiality? m0
+            ╭─ Attack trace:
+            │ 1. Attacker observes c0 on the wire.
+            │ 2. Attacker is handed k0 by a leaks declaration.
+            │ 3. Attacker opens c0 with k0, n0, obtaining m0.
+            ╰▸ m0 (m0) is obtained by Attacker.
+     Fail ✗ confidentiality? m1
+            ╭─ Attack trace:
+            │ 1. Attacker observes c1 on the wire.
+            │ 2. Attacker is handed k0 by a leaks declaration.
+            │ 3. Attacker constructs k1.
+            │ 4. Attacker opens c1 with k1, n1, obtaining m1.
+            ╰▸ m1 (m1) is obtained by Attacker.
+     Pass ✓ confidentiality? m2  [search exhausted at 2 sessions]
+     Pass ✓ authentication? Client -> Server: c0  [search exhausted at 2 sessions]
+     Pass ✓ authentication? Client -> Server: c1  [search exhausted at 2 sessions]
+     Pass ✓ authentication? Client -> Server: commit  [search exhausted at 2 sessions]
+     Pass ✓ authentication? Client -> Server: c2  [search exhausted at 2 sessions]
+
+──────────────────────────────────────────────────
+     Fail ✗ 2 of 7 queries failed.
+ Verifpal ◆ Thank you for using Verifpal.

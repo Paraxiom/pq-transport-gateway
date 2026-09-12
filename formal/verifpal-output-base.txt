@@ -1,0 +1,17 @@
+Verifpal 1.4.10 - https://verifpal.com
+ Verifpal * Verification initiated for 'pqtg-handshake.vp' at 07:28:08 AM.
+     Info . Analyzing 2 parallel sessions per principal; per-session values and principals are suffixed #2.
+     Info . Attacker is configured as active.
+     Info . Running at phase 0.
+
+--------------------------------------------------
+ Verifpal * Verification completed for 'pqtg-handshake.vp' at 07:28:08 AM in 81ms.
+
+     PASS + confidentiality? session_key_s  [search exhausted at 2 sessions]
+     PASS + confidentiality? session_key_c  [search exhausted at 2 sessions]
+     PASS + authentication? Server -> Client: transcript_sig  [search exhausted at 2 sessions]
+
+--------------------------------------------------
+     PASS + All 3 queries pass.
+ Verifpal * Thank you for using Verifpal.
+--- result code (verifpal verify --result-code --quiet): c0c0a0

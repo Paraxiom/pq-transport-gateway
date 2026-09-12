@@ -1,0 +1,74 @@
+// PQTG relay record layer: the silent hash ratchet (src/relay.rs DirectionalCipher)
+// ---------------------------------------------------------------------------
+// One direction of an established relay session, three epochs unrolled (the
+// code ratchets every REKEY_EVERY_RECORDS records; symbolically one record per
+// epoch is enough). The other direction is the same model under the other key.
+//
+//   k0            = HASH(lbl, ss): the directional key from the handshake. The
+//                   handshake itself is stood in for by an ephemeral KEM whose
+//                   public key and ciphertext are delivered GUARDED (authentic),
+//                   which is what the signed, pinned, allow-listed handshake
+//                   provides (pqtg-relay-handshake-clientauth.vp). A fresh key
+//                   per session keeps Verifpal's nonce-reuse reasoning honest.
+//   k(n+1)        = SHA3-256(RATCHET_LABEL ‖ k(n) ‖ (n+1))   -> HASH(lbl, kn, e(n+1))
+//   record        = nonce(12) ‖ AES-256-GCM(k_epoch, plaintext), nonce = epoch ‖ counter,
+//                   no associated data -> AEAD_ENC(k_epoch, n_epoch, m, nil)
+//   both sides ratchet at the same record count with NOTHING on the wire; the
+//   receiver accepts only the exact next nonce (open()).
+//
+// Verifpal 1.4.10 signature: AEAD_ENC(key, nonce, plaintext, ad) / AEAD_DEC(key, nonce, ct, ad)?
+//
+// Queries: confidentiality of every record; injective authentication of every
+// record (no substitution, no replay into another slot).
+
+attacker[active]
+
+principal Client[
+    knows public lbl, e1, e2, n0, n1, n2
+    generates dk
+    ek = PUBKEY(dk)
+    generates m0, m1, m2
+]
+
+principal Server[
+    knows public lbl, e1, e2, n0, n1, n2
+    generates r
+]
+
+Client -> Server: [ek]
+
+principal Server[
+    ss, ct = KEM_ENCAP(ek, r)
+    k0 = HASH(lbl, ss)
+    k1 = HASH(lbl, k0, e1)
+    k2 = HASH(lbl, k1, e2)
+]
+
+Server -> Client: [ct]
+
+principal Client[
+    ss_c = KEM_DECAP(dk, ct)
+    k0_c = HASH(lbl, ss_c)
+    k1_c = HASH(lbl, k0_c, e1)
+    k2_c = HASH(lbl, k1_c, e2)
+    c0 = AEAD_ENC(k0_c, n0, m0, nil)
+    c1 = AEAD_ENC(k1_c, n1, m1, nil)
+    c2 = AEAD_ENC(k2_c, n2, m2, nil)
+]
+
+Client -> Server: c0, c1, c2
+
+principal Server[
+    m0_s = AEAD_DEC(k0, n0, c0, nil)?
+    m1_s = AEAD_DEC(k1, n1, c1, nil)?
+    m2_s = AEAD_DEC(k2, n2, c2, nil)?
+]
+
+queries[
+    confidentiality? m0
+    confidentiality? m1
+    confidentiality? m2
+    authentication? Client -> Server: c0
+    authentication? Client -> Server: c1
+    authentication? Client -> Server: c2
+]

@@ -93,8 +93,10 @@ use crate::replay::{ReplayGuard, Verdict};
 /// can never be confused by a peer that speaks only one of them. `relay-2`
 /// added the signed, time-stamped hello (client authentication, finding R1);
 /// a `relay-1` peer is refused with a version mismatch rather than accepted
-/// unauthenticated.
-pub const RELAY_VERSION: &str = "relay-2";
+/// unauthenticated. `relay-3` added the KEM re-injection into the record-layer
+/// ratchet (typed records); a `relay-2` peer would misparse records, so it is
+/// refused at the version check too.
+pub const RELAY_VERSION: &str = "relay-3";
 
 /// Domain separator for the relay transcript. Keeps relay handshake signatures
 /// disjoint from gateway handshake signatures made with the same Falcon key.
@@ -140,15 +142,32 @@ const CHUNK_BYTES: usize = 64 * 1024;
 /// At 64 KiB records this is a rekey roughly every 4 GiB in one direction,
 /// which on a validator link is hours rather than seconds. The point is not
 /// nonce exhaustion, which a 64-bit counter makes unreachable, but bounding how
-/// much EARLIER traffic a key recovered later exposes: the ratchet is one-way,
-/// so epoch N's key does not yield the epochs before it. It does yield every
-/// epoch after it, because the chain carries no fresh entropy; a compromised
-/// epoch key exposes the rest of that connection
-/// (`formal/RATCHET-RESULTS-2026-09-12.md`, T2 and T3).
+/// much traffic a compromised epoch key exposes. The ratchet is one-way, so
+/// epoch N's key does not yield the epochs before it, and since `relay-3` each
+/// step also absorbs fresh ML-KEM material offered by the peer, so epoch N's
+/// key does not yield the epochs after it either (post-compromise security,
+/// backlog B11; `formal/RATCHET-RESULTS-2026-09-12.md`). Without an offer in
+/// hand the step is hash-only and the second guarantee lapses for that epoch.
 const REKEY_EVERY_RECORDS: u64 = 65_536;
 
-/// Domain separator for the ratchet step.
-const RATCHET_LABEL: &[u8] = b"PQTG-RELAY-RATCHET-v1\x00";
+/// Domain separator for the ratchet step. v2: the step also absorbs fresh
+/// ML-KEM material when the peer offered a key (backlog B11).
+const RATCHET_LABEL: &[u8] = b"PQTG-RELAY-RATCHET-v2\x00";
+
+/// Record types, the first byte of every AEAD plaintext. Control material rides
+/// inside ordinary sequenced records, so there is nothing to race and no
+/// extra nonce slots are consumed.
+const REC_DATA: u8 = 0x00;
+/// Followed by an ML-KEM-768 encapsulation key: "when you next ratchet the
+/// direction you send to me, encapsulate to this", then the data.
+const REC_OFFER: u8 = 0x01;
+/// Followed by an ML-KEM-768 ciphertext against the peer's last offer, then the
+/// data. Last record of its epoch: both sides ratchet with the shared secret
+/// right after it.
+const REC_COMMIT_KEM: u8 = 0x02;
+/// Last record of its epoch with no fresh material (the peer never offered a
+/// key). Both sides ratchet hash-only, as in `relay-2`; logged at WARN.
+const REC_COMMIT_HASH_ONLY: u8 = 0x03;
 
 /// TCP keepalive, so a peer that dies without sending a FIN is noticed.
 ///
@@ -420,10 +439,35 @@ where
 // Directional cipher
 // ---------------------------------------------------------------------------
 
+/// What one endpoint's two directions share so the ratchet can take fresh
+/// key material (backlog B11): the peer's last offered ML-KEM key (used by
+/// `send` at its next epoch boundary), the decapsulation key behind our own
+/// last offer (used by `recv` when the peer commits), and whether `send`
+/// owes the peer a new offer. Touched only on control records and at epoch
+/// boundaries, never per data byte.
+#[derive(Default)]
+pub struct RekeyLink {
+    peer_ek: Option<Vec<u8>>,
+    my_dk: Option<EphemeralKemKey>,
+    offer_pending: bool,
+}
+
+impl RekeyLink {
+    /// A fresh link owes the peer an offer immediately, so the first data
+    /// record on each direction carries one.
+    pub fn new() -> Arc<Mutex<Self>> {
+        Arc::new(Mutex::new(Self {
+            peer_ek: None,
+            my_dk: None,
+            offer_pending: true,
+        }))
+    }
+}
+
 /// One direction of a relay session: its own AES-256-GCM key and its own nonce
 /// counter, owned outright by whichever task uses it.
 ///
-/// # Rekey without a message
+/// # Rekey without a round trip
 ///
 /// qssh's in-band rekey injects a negotiation into the same stream the
 /// forwarder is reading. Its own source says so: "in-band rekey races the
@@ -431,30 +475,40 @@ where
 /// 508 production rekeys failed, and why their fallback was to drop the
 /// connection and reconnect instead.
 ///
-/// This ratchets instead. Every `REKEY_EVERY_RECORDS` records both ends derive
-/// the next epoch key from the current one, deterministically, at the same
-/// record count. **No message crosses the wire**, so there is nothing to race,
-/// nothing to negotiate, and nothing that can desynchronise: the two sides are
-/// driven by a counter they already agree on.
-///
-/// The ratchet is one-way (`SHA3-256` of the previous key), so a key recovered
-/// in epoch N does not yield epoch N-1; it does yield N+1 and later, since
-/// nothing fresh enters the chain (symbolically checked, both directions of
-/// that claim, in `formal/pqtg-relay-ratchet*.vp`). Nonces carry the epoch in
-/// their top four bytes, so a counter that restarts each epoch can never repeat
-/// a nonce under the same key.
+/// This ratchets instead. Every `REKEY_EVERY_RECORDS` records the sender marks
+/// the last record of the epoch as a COMMIT and both ends derive the next epoch
+/// key right after it, deterministically. There is no negotiation and no
+/// acknowledgement: the marker is a type byte inside an ordinary, sequenced,
+/// authenticated record, so there is nothing to race and nothing that can
+/// desynchronise. Since `relay-3` the commit also carries an ML-KEM
+/// encapsulation against a key the peer offered earlier in the stream, and
+/// the shared secret enters the next epoch key: a key recovered in epoch N
+/// then yields neither the epochs before N (one-way hash) nor the epochs after
+/// it (fresh material). If no offer is in hand at the boundary the step is
+/// hash-only, logged at WARN, and only the backward guarantee holds for that
+/// epoch. Nonces carry the epoch in their top four bytes, so a counter that
+/// restarts each epoch can never repeat a nonce under the same key.
 pub struct DirectionalCipher {
     cipher: aes_gcm::Aes256Gcm,
-    /// Current epoch key, retained to derive the next one.
+    /// Current epoch key, retained to derive the next one; zeroized on ratchet.
     key: [u8; 32],
     /// Records sealed or opened in this epoch.
     nonce_counter: u64,
     /// Ratchet generation, carried in the nonce.
     epoch: u32,
+    /// Sender policy: records per epoch. The receiver follows the COMMIT
+    /// markers instead, so only the sender's value matters on the wire.
+    records_per_epoch: u64,
+    /// Shared with the opposite direction of the same endpoint.
+    link: Arc<Mutex<RekeyLink>>,
+    /// Telemetry: how the epochs so far were entered.
+    kem_ratchets: u32,
+    hash_only_ratchets: u32,
+    last_ratchet_fresh: bool,
 }
 
 impl DirectionalCipher {
-    fn new(key: &[u8; 32]) -> Self {
+    fn new(key: &[u8; 32], link: Arc<Mutex<RekeyLink>>) -> Self {
         use aes_gcm::{Aes256Gcm, KeyInit};
         let cipher = Aes256Gcm::new(key.into());
         Self {
@@ -462,12 +516,30 @@ impl DirectionalCipher {
             key: *key,
             nonce_counter: 0,
             epoch: 0,
+            records_per_epoch: REKEY_EVERY_RECORDS,
+            link,
+            kem_ratchets: 0,
+            hash_only_ratchets: 0,
+            last_ratchet_fresh: false,
         }
     }
 
     /// Current ratchet generation. Exposed for tests and telemetry.
     pub fn epoch(&self) -> u32 {
         self.epoch
+    }
+
+    /// Epochs entered with fresh ML-KEM material, and without. Telemetry and
+    /// tests; the binary logs `last_ratchet_fresh` instead, hence the bin-side
+    /// allow.
+    #[allow(dead_code)]
+    pub fn ratchet_counts(&self) -> (u32, u32) {
+        (self.kem_ratchets, self.hash_only_ratchets)
+    }
+
+    /// Whether the most recent ratchet absorbed fresh material.
+    pub fn last_ratchet_fresh(&self) -> bool {
+        self.last_ratchet_fresh
     }
 
     /// Nonce for the record at this position: `epoch(4) || counter(8)`.
@@ -478,15 +550,16 @@ impl DirectionalCipher {
         n
     }
 
-    /// Advance to the next epoch if this one is full.
-    ///
-    /// Called identically on both sides after each record, so the two stay in
-    /// step without exchanging anything.
-    fn maybe_ratchet(&mut self) -> Result<()> {
-        if self.nonce_counter < REKEY_EVERY_RECORDS {
-            return Ok(());
-        }
+    fn lock_link(&self) -> std::sync::MutexGuard<'_, RekeyLink> {
+        self.link.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Advance to the next epoch, absorbing `fresh` (an ML-KEM shared secret,
+    /// or nothing). Called identically on both sides right after the COMMIT
+    /// record, so the two stay in step. The previous key is zeroized.
+    fn ratchet(&mut self, fresh: &[u8]) -> Result<()> {
         use aes_gcm::{Aes256Gcm, KeyInit};
+        use zeroize::Zeroize;
 
         let next_epoch = self.epoch.checked_add(1).ok_or_else(|| {
             anyhow!("ratchet epoch exhausted; the session must be re-established")
@@ -496,30 +569,97 @@ impl DirectionalCipher {
         h.update(RATCHET_LABEL);
         h.update(self.key);
         h.update(next_epoch.to_be_bytes());
+        h.update((fresh.len() as u32).to_be_bytes());
+        h.update(fresh);
         let mut next = [0u8; 32];
         next.copy_from_slice(&h.finalize());
 
         self.cipher = Aes256Gcm::new(&next.into());
+        self.key.zeroize();
         self.key = next;
+        next.zeroize();
         self.epoch = next_epoch;
         self.nonce_counter = 0;
-        debug!("relay: ratcheted to epoch {next_epoch}");
+        if fresh.is_empty() {
+            self.hash_only_ratchets += 1;
+            self.last_ratchet_fresh = false;
+            warn!(
+                "relay: ratcheted to epoch {next_epoch} WITHOUT fresh key material (the peer \
+                 offered none); this epoch has backward secrecy only"
+            );
+        } else {
+            self.kem_ratchets += 1;
+            self.last_ratchet_fresh = true;
+            debug!("relay: ratcheted to epoch {next_epoch} with fresh ML-KEM material");
+        }
         Ok(())
     }
 
-    /// Seal one record. Wire form: `nonce(12) || ciphertext`.
+    /// Seal one record. Wire form: `nonce(12) || AEAD(type || control || data)`.
+    ///
+    /// Control material is decided here: an OFFER if this endpoint owes the
+    /// peer one, or, on the last record of the epoch, a COMMIT (with an
+    /// encapsulation against the peer's last offer when there is one). Never
+    /// both in one record: an offer due at a boundary waits for the next
+    /// record.
     pub fn seal(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
         use aes_gcm::aead::Aead;
         use aes_gcm::Nonce;
+        use zeroize::Zeroize;
+
+        let last_of_epoch = self.nonce_counter + 1 >= self.records_per_epoch;
+        let mut body = Vec::with_capacity(1 + ML_KEM_768_EK_LEN + plaintext.len());
+        // Fresh material to absorb after this record is on the wire.
+        let mut fresh: Option<[u8; 32]> = None;
+
+        if last_of_epoch {
+            let peer_ek = self.lock_link().peer_ek.take();
+            match peer_ek {
+                Some(ek) => {
+                    let (ct, ss) = encapsulate_to(&ek)?;
+                    body.push(REC_COMMIT_KEM);
+                    body.extend_from_slice(&ct);
+                    fresh = Some(ss);
+                }
+                None => body.push(REC_COMMIT_HASH_ONLY),
+            }
+        } else {
+            let owes_offer = {
+                let mut link = self.lock_link();
+                if link.offer_pending {
+                    link.offer_pending = false;
+                    true
+                } else {
+                    false
+                }
+            };
+            if owes_offer {
+                let kem = EphemeralKemKey::new().context("relay: ML-KEM keygen for offer")?;
+                body.push(REC_OFFER);
+                body.extend_from_slice(&kem.ek_bytes);
+                self.lock_link().my_dk = Some(kem);
+            } else {
+                body.push(REC_DATA);
+            }
+        }
+        body.extend_from_slice(plaintext);
 
         let nonce_bytes = self.nonce_bytes();
         let ct = self
             .cipher
-            .encrypt(Nonce::from_slice(&nonce_bytes), plaintext)
+            .encrypt(Nonce::from_slice(&nonce_bytes), body.as_slice())
             .map_err(|_| anyhow!("relay record encryption failed"))?;
-
         self.nonce_counter += 1;
-        self.maybe_ratchet()?;
+
+        if last_of_epoch {
+            match fresh.as_mut() {
+                Some(ss) => {
+                    self.ratchet(&ss[..])?;
+                    ss.zeroize();
+                }
+                None => self.ratchet(&[])?,
+            }
+        }
 
         let mut out = Vec::with_capacity(12 + ct.len());
         out.extend_from_slice(&nonce_bytes);
@@ -527,13 +667,18 @@ impl DirectionalCipher {
         Ok(out)
     }
 
-    /// Open one record. Rejects a nonce that is not the one expected next, so a
-    /// reordered or replayed record fails rather than being silently accepted.
+    /// Open one record and return its data. Rejects a nonce that is not the one
+    /// expected next, so a reordered or replayed record fails rather than
+    /// being silently accepted. Control material is consumed here: an OFFER is
+    /// stored for this endpoint's opposite direction, a COMMIT ratchets this
+    /// direction (with the peer's material decapsulated under the key behind
+    /// our last offer) and makes a new offer due.
     pub fn open(&mut self, record: &[u8]) -> Result<Vec<u8>> {
         use aes_gcm::aead::Aead;
         use aes_gcm::Nonce;
+        use zeroize::Zeroize;
 
-        if record.len() < 12 + 16 {
+        if record.len() < 12 + 16 + 1 {
             return Err(anyhow!("relay record too short: {} bytes", record.len()));
         }
         let (nonce_bytes, ct) = record.split_at(12);
@@ -545,16 +690,60 @@ impl DirectionalCipher {
             ));
         }
 
-        let plaintext = self
+        let body = self
             .cipher
             .decrypt(Nonce::from_slice(nonce_bytes), ct)
             .map_err(|_| anyhow!("relay record authentication failed"))?;
+        let (kind, rest) = body
+            .split_first()
+            .ok_or_else(|| anyhow!("relay record has no type byte"))?;
+
+        // Decide what to do BEFORE advancing, so a malformed record leaves the
+        // session exactly where it was.
+        let (data, action): (&[u8], Option<Option<[u8; 32]>>) = match *kind {
+            REC_DATA => (rest, None),
+            REC_OFFER => {
+                if rest.len() < ML_KEM_768_EK_LEN {
+                    return Err(anyhow!("relay OFFER record is truncated"));
+                }
+                let (ek, data) = rest.split_at(ML_KEM_768_EK_LEN);
+                self.lock_link().peer_ek = Some(ek.to_vec());
+                (data, None)
+            }
+            REC_COMMIT_KEM => {
+                if rest.len() < ML_KEM_768_CT_LEN {
+                    return Err(anyhow!("relay COMMIT record is truncated"));
+                }
+                let (ct, data) = rest.split_at(ML_KEM_768_CT_LEN);
+                let dk = self.lock_link().my_dk.take().ok_or_else(|| {
+                    anyhow!(
+                        "relay COMMIT carries an encapsulation but this endpoint offered no \
+                         key; refusing rather than guessing"
+                    )
+                })?;
+                let ss = dk.decapsulate(ct)?;
+                (data, Some(Some(ss)))
+            }
+            REC_COMMIT_HASH_ONLY => (rest, Some(None)),
+            other => return Err(anyhow!("relay record has unknown type {other:#04x}")),
+        };
+        let data = data.to_vec();
 
         // Advance only on success, so a rejected record does not desynchronise
         // the session or push the ratchet forward.
         self.nonce_counter += 1;
-        self.maybe_ratchet()?;
-        Ok(plaintext)
+        if let Some(fresh) = action {
+            match fresh {
+                Some(mut ss) => {
+                    self.ratchet(&ss[..])?;
+                    ss.zeroize();
+                }
+                None => self.ratchet(&[])?,
+            }
+            // The peer consumed our offer (or had none): owe it a new one.
+            self.lock_link().offer_pending = true;
+        }
+        Ok(data)
     }
 }
 
@@ -751,9 +940,16 @@ pub async fn client_handshake(
     let secret = kem.decapsulate(&server_hello.kem_ciphertext)?;
 
     // The client sends on c2s and receives on s2c.
+    let link = RekeyLink::new();
     Ok(RelaySession {
-        send: DirectionalCipher::new(&derive_directional_key(&secret, &transcript, KDF_LABEL_C2S)),
-        recv: DirectionalCipher::new(&derive_directional_key(&secret, &transcript, KDF_LABEL_S2C)),
+        send: DirectionalCipher::new(
+            &derive_directional_key(&secret, &transcript, KDF_LABEL_C2S),
+            link.clone(),
+        ),
+        recv: DirectionalCipher::new(
+            &derive_directional_key(&secret, &transcript, KDF_LABEL_S2C),
+            link,
+        ),
         peer_falcon_vk: server_hello.falcon_vk,
     })
 }
@@ -865,9 +1061,16 @@ pub async fn server_handshake(
     write_len_prefixed(stream, &bincode::serialize(&server_hello)?).await?;
 
     // The server sends on s2c and receives on c2s: the mirror of the client.
+    let link = RekeyLink::new();
     Ok(RelaySession {
-        send: DirectionalCipher::new(&derive_directional_key(&secret, &transcript, KDF_LABEL_S2C)),
-        recv: DirectionalCipher::new(&derive_directional_key(&secret, &transcript, KDF_LABEL_C2S)),
+        send: DirectionalCipher::new(
+            &derive_directional_key(&secret, &transcript, KDF_LABEL_S2C),
+            link.clone(),
+        ),
+        recv: DirectionalCipher::new(
+            &derive_directional_key(&secret, &transcript, KDF_LABEL_C2S),
+            link,
+        ),
         peer_falcon_vk: hello.falcon_vk,
     })
 }
@@ -939,10 +1142,14 @@ pub async fn splice_with_idle_timeout(
             // show it happening has not tested it.
             if send.epoch() != epoch_before {
                 info!(
-                    "relay: RATCHET send epoch {} -> {} after {records} records, \
-                     no message on the wire",
+                    "relay: RATCHET send epoch {} -> {} after {records} records, {}",
                     epoch_before,
-                    send.epoch()
+                    send.epoch(),
+                    if send.last_ratchet_fresh() {
+                        "with fresh ML-KEM material, no round trip"
+                    } else {
+                        "HASH-ONLY (peer offered no key)"
+                    }
                 );
             }
             if write_len_prefixed(&mut enc_w, &record).await.is_err() {
@@ -982,13 +1189,17 @@ pub async fn splice_with_idle_timeout(
             records += 1;
             if recv.epoch() != epoch_before {
                 info!(
-                    "relay: RATCHET recv epoch {} -> {} after {records} records, \
-                     in step with the peer having exchanged nothing",
+                    "relay: RATCHET recv epoch {} -> {} after {records} records, {}",
                     epoch_before,
-                    recv.epoch()
+                    recv.epoch(),
+                    if recv.last_ratchet_fresh() {
+                        "with fresh ML-KEM material, in step with the peer"
+                    } else {
+                        "HASH-ONLY (we had offered no key)"
+                    }
                 );
             }
-            if plain_w.write_all(&plaintext).await.is_err() {
+            if !plaintext.is_empty() && plain_w.write_all(&plaintext).await.is_err() {
                 break;
             }
             total += plaintext.len() as u64;
@@ -1903,8 +2114,175 @@ mod tests {
 
     /// Two ciphers sharing one key: a send half and the matching receive half.
     fn paired_ciphers() -> (DirectionalCipher, DirectionalCipher) {
+        // Two endpoints, one direction: the sender's link and the receiver's
+        // link are different endpoints' links. The receiver never sends, so it
+        // never offers a key and every ratchet on this pair is hash-only.
         let key = [7u8; 32];
-        (DirectionalCipher::new(&key), DirectionalCipher::new(&key))
+        (
+            DirectionalCipher::new(&key, RekeyLink::new()),
+            DirectionalCipher::new(&key, RekeyLink::new()),
+        )
+    }
+
+    /// Two full endpoints A and B, both directions wired, small epochs, so the
+    /// KEM re-injection can be exercised in a handful of records.
+    #[allow(clippy::type_complexity)]
+    fn full_duplex_pair(
+        records_per_epoch: u64,
+    ) -> (
+        (DirectionalCipher, DirectionalCipher),
+        (DirectionalCipher, DirectionalCipher),
+    ) {
+        let k_ab = [1u8; 32];
+        let k_ba = [2u8; 32];
+        let link_a = RekeyLink::new();
+        let link_b = RekeyLink::new();
+        let mut a_send = DirectionalCipher::new(&k_ab, link_a.clone());
+        let mut a_recv = DirectionalCipher::new(&k_ba, link_a);
+        let mut b_send = DirectionalCipher::new(&k_ba, link_b.clone());
+        let mut b_recv = DirectionalCipher::new(&k_ab, link_b);
+        for c in [&mut a_send, &mut a_recv, &mut b_send, &mut b_recv] {
+            c.records_per_epoch = records_per_epoch;
+        }
+        ((a_send, a_recv), (b_send, b_recv))
+    }
+
+    /// Hash-only next key, computed the way `ratchet(&[])` does, to check that
+    /// a real ratchet did NOT take this path.
+    fn hash_only_next(key: &[u8; 32], next_epoch: u32) -> [u8; 32] {
+        let mut h = Sha3_256::new();
+        h.update(RATCHET_LABEL);
+        h.update(key);
+        h.update(next_epoch.to_be_bytes());
+        h.update(0u32.to_be_bytes());
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&h.finalize());
+        out
+    }
+
+    // ---- KEM re-injection (backlog B11) ------------------------------------
+
+    /// Both directions flowing: A's first record offers a key to B, B's first
+    /// record offers one to A, and at A's epoch boundary the COMMIT carries an
+    /// encapsulation to B's offer. Both sides enter epoch 1 with fresh
+    /// material, and B immediately owes A a new offer.
+    #[tokio::test]
+    async fn a_full_duplex_pair_rekeys_with_fresh_kem_material() {
+        let ((mut a_send, mut a_recv), (mut b_send, mut b_recv)) = full_duplex_pair(4);
+
+        // B -> A first, so A holds B's offer before A's boundary.
+        let r = b_send.seal(b"hello from b").expect("seal");
+        assert_eq!(a_recv.open(&r).expect("open"), b"hello from b");
+
+        let k0 = a_send.key;
+        for i in 0..4u8 {
+            let r = a_send.seal(&[i]).expect("seal");
+            assert_eq!(b_recv.open(&r).expect("open"), [i]);
+        }
+        assert_eq!(a_send.epoch(), 1);
+        assert_eq!(b_recv.epoch(), 1);
+        assert_eq!(
+            a_send.ratchet_counts(),
+            (1, 0),
+            "A ratcheted with fresh material"
+        );
+        assert_eq!(
+            b_recv.ratchet_counts(),
+            (1, 0),
+            "B followed with the same material"
+        );
+        assert_eq!(
+            a_send.key, b_recv.key,
+            "both sides hold the same epoch-1 key"
+        );
+        assert_ne!(
+            a_send.key,
+            hash_only_next(&k0, 1),
+            "post-compromise security: epoch 1 is not a function of epoch 0 alone"
+        );
+
+        // B now owes A a fresh offer; it rides on B's next record.
+        let r = b_send.seal(b"again").expect("seal");
+        assert_eq!(a_recv.open(&r).expect("open"), b"again");
+        assert!(
+            a_send.lock_link().peer_ek.is_some(),
+            "A must hold a new offer from B for its next boundary"
+        );
+    }
+
+    /// The property in the model (`pqtg-relay-ratchet-kem-leak-k0.vp`): an
+    /// attacker holding epoch 0's key cannot derive epoch 1 when a KEM step
+    /// happened, because the shared secret never crossed the wire in clear.
+    #[tokio::test]
+    async fn an_early_epoch_key_does_not_yield_a_kem_ratcheted_epoch() {
+        let ((mut a_send, mut a_recv), (mut b_send, mut b_recv)) = full_duplex_pair(2);
+        let r = b_send.seal(b"offer").expect("seal");
+        a_recv.open(&r).expect("open");
+        let leaked_k0 = a_send.key;
+        for i in 0..2u8 {
+            let r = a_send.seal(&[i]).expect("seal");
+            b_recv.open(&r).expect("open");
+        }
+        assert_eq!(a_send.epoch(), 1);
+        // Everything an attacker with k0 could compute on its own:
+        let guess = hash_only_next(&leaked_k0, 1);
+        assert_ne!(a_send.key, guess);
+        assert_ne!(b_recv.key, guess);
+    }
+
+    /// Without the reverse direction there is no offer, so the boundary is a
+    /// hash-only step: the relay-2 behaviour, still in step, and counted.
+    #[tokio::test]
+    async fn without_an_offer_the_ratchet_is_hash_only_and_still_in_step() {
+        let (mut send, mut recv) = paired_ciphers();
+        send.records_per_epoch = 3;
+        let k0 = send.key;
+        for i in 0..3u8 {
+            let r = send.seal(&[i]).expect("seal");
+            assert_eq!(recv.open(&r).expect("open"), [i]);
+        }
+        assert_eq!(send.epoch(), 1);
+        assert_eq!(recv.epoch(), 1);
+        assert_eq!(send.ratchet_counts(), (0, 1));
+        assert_eq!(recv.ratchet_counts(), (0, 1));
+        assert_eq!(
+            send.key,
+            hash_only_next(&k0, 1),
+            "hash-only step, as documented"
+        );
+        assert_eq!(send.key, recv.key);
+    }
+
+    /// A COMMIT carrying an encapsulation to a key this endpoint never offered
+    /// is refused, not guessed at, and leaves the session where it was.
+    #[tokio::test]
+    async fn a_commit_against_no_offer_is_refused() {
+        let ((mut a_send, _a_recv), (_b_send, mut b_recv)) = full_duplex_pair(2);
+        // Give A an offer from a THIRD party, not from B.
+        let stray = EphemeralKemKey::new().expect("kem");
+        a_send.lock_link().peer_ek = Some(stray.ek_bytes.clone());
+        let r0 = a_send.seal(b"x").expect("seal");
+        b_recv.open(&r0).expect("first record opens");
+        let r1 = a_send.seal(b"y").expect("seal (commit)");
+        let err = b_recv.open(&r1).unwrap_err();
+        assert!(err.to_string().contains("offered no key"), "got: {err}");
+        assert_eq!(
+            b_recv.epoch(),
+            0,
+            "a refused commit must not move the epoch"
+        );
+    }
+
+    #[test]
+    fn the_previous_epoch_key_is_zeroized_on_ratchet() {
+        // Not a memory-forensics test, only that the field no longer holds the
+        // old value once the epoch has moved.
+        let (mut send, _) = paired_ciphers();
+        send.records_per_epoch = 1;
+        let k0 = send.key;
+        send.seal(b"x").expect("seal");
+        assert_eq!(send.epoch(), 1);
+        assert_ne!(send.key, k0);
     }
 
     #[tokio::test]
@@ -1992,6 +2370,9 @@ mod tests {
         let c2s = derive_directional_key(&secret, &transcript, KDF_LABEL_C2S);
         let s2c = derive_directional_key(&secret, &transcript, KDF_LABEL_S2C);
         assert_ne!(c2s, s2c, "directional keys must differ");
-        (DirectionalCipher::new(&c2s), DirectionalCipher::new(&s2c))
+        (
+            DirectionalCipher::new(&c2s, RekeyLink::new()),
+            DirectionalCipher::new(&s2c, RekeyLink::new()),
+        )
     }
 }

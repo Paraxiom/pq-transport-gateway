@@ -45,6 +45,20 @@ With `k0` leaked after the run, every record falls. The chain is `k(n+1) = H(k(n
 ### T5 (holds by construction): nonce uniqueness
 The counter restarts every epoch, but the nonce carries the epoch in its top four bytes and the key changes with the epoch, so no (key, nonce) pair repeats within a connection, and the per-connection handshake key keeps pairs distinct across connections. In the model this is the fact that `n0`, `n1`, `n2` are distinct and the key is per session; Verifpal 1.x would have reported a reuse otherwise.
 
+## relay-3, same day: KEM re-injection closes T3, zeroization closes T4
+
+`src/relay.rs` now types every record (`DATA`, `OFFER`, `COMMIT_KEM`, `COMMIT_HASH_ONLY`, one byte inside the AEAD plaintext). An endpoint's first data record on each direction carries an OFFER, a fresh ML-KEM-768 encapsulation key; the peer, on the last record of its epoch, carries a COMMIT with an encapsulation to that key; both sides mix the shared secret into the next epoch key, `k(n+1) = SHA3-256(label_v2 ‖ k(n) ‖ n+1 ‖ len ‖ ss)`, and the receiver then owes a new offer. No round trip, no negotiation, no extra nonce slots: the control bytes ride inside sequenced authenticated records, so the qssh race the silent ratchet was designed against still cannot occur. With no offer in hand at a boundary the step is hash-only and logged; the previous epoch key is zeroized either way.
+
+| Model (`formal/pqtg-relay-ratchet-kem*.vp`, hash-only step 0→1, KEM step 1→2) | queries `m0 m1 m2 c0 c1 commit c2` | 1 session | 2 sessions | saturate |
+|---|---|---|---|---|
+| base | | `c0c0c0a0a0a0a0` | `c0c0c0a0a0a0a0` | unchanged 2→3 |
+| early key `k0` leaks after the run | | `c1c1c0a0a0a0a0` | `c1c1c0a0a0a0a0` | |
+| current key `k2` leaks after the run | | `c0c0c1a0a0a0a0` | `c0c0c1a0a0a0a0` | |
+
+Reading: with `k0` leaked, the hash-only epochs 0 and 1 fall as before, and epoch 2 holds because its key absorbed a secret that never crossed the wire in clear. With `k2` leaked, backward secrecy is unchanged. The COMMIT record itself is injectively authenticated. Code-side, six tests cover the full-duplex rekey (both sides enter epoch 1 with the same fresh key, and it is not the hash-only successor of epoch 0), the hash-only fallback when the peer never offers, a COMMIT against no offer being refused without moving the epoch, and the old key no longer being present after a ratchet.
+
+Honest limits: the offer rides on data, so a direction that never carries data never offers, and the opposite direction then ratchets hash-only (the log says so). Post-compromise security is per epoch boundary: a key compromised mid-epoch exposes the rest of that epoch, up to `REKEY_EVERY_RECORDS` records. The symbolic model treats the OFFER as guarded delivery, which is what an AEAD record under an authenticated session provides.
+
 ## How to say this
 
 Say: *"The relay record layer is symbolically verified (Verifpal 1.4.10, three epochs, 2 sessions unchanged at 3) for confidentiality and injective authentication of every record, and the one-way ratchet is verified to give backward secrecy: a key recovered later does not expose earlier epochs. It does not give post-compromise security; a compromised epoch key exposes the rest of that connection."*

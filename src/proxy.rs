@@ -212,6 +212,9 @@ impl ClientHelloV3 {
     /// Client side: sign the hello with the identity whose keys it carries.
     /// `identity.falcon_pk_bytes()` must equal `self.falcon_vk`; a signature by
     /// any other key could never verify under `falcon_vk` on the server.
+    /// Library API for clients; the gateway binary itself never signs a hello,
+    /// hence the bin-side allow.
+    #[allow(dead_code)]
     pub fn sign(&mut self, identity: &PqKeyExchange) -> Result<()> {
         if identity.falcon_pk_bytes() != self.falcon_vk.as_slice() {
             return Err(anyhow!(

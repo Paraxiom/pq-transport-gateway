@@ -74,3 +74,17 @@ Both legs leaked at once is expected to fail and was not run.
 6. Longer horizon: a **computational** obligation (CryptoVerif) or a Lean protocol-level lemma, to move from "symbolically verified" to "proven."
 
 Keep this model in lockstep with `src/crypto.rs`/`src/proxy.rs`: if the handshake changes, the model and this mapping change with it, or the proof is fiction.
+
+## Relay handshake (added 2026-09-12)
+
+The relay (`src/relay.rs`) is a different protocol from the gateway handshake: six-input transcript including the client's Falcon vk, two directional keys, no QKD leg. Its models and results live alongside:
+
+| File | Role |
+|---|---|
+| `pqtg-relay-handshake.vp` | as shipped: pinned server, unauthenticated client |
+| `pqtg-relay-handshake-nopin.vp` | pin removed (`PinPolicy::Unpinned`) |
+| `pqtg-relay-handshake-clientauth.vp` | fix candidate: server allow-list + client-signed hello (backlog B10) |
+| `pqtg-relay-handshake-fs.vp`, `-clientauth-fs.vp` | forward secrecy: long-term keys leak in phase 1 |
+| `RELAY-RESULTS-2026-09-12.md` | results, findings R1–R4, wording |
+
+Run: `verifpal verify formal/pqtg-relay-handshake.vp` (add `--sessions 1` or `--saturate`; `--result-code --quiet` for the compact verdict). Expected as shipped: `c1c1c0c0a0a1` at one session (server keys fall to an attacker acting as the client, R1; the honest client's keys and server authentication hold), `c1c1c1c1a0a1` at two (the extra failures are the same tool artefact as gateway F3). Client-authenticated: `c0c0c0c0a0a0` at one session, only hello replay failing at two.

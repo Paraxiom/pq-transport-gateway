@@ -1,0 +1,59 @@
+// Variant of pqtg-relay-handshake.vp with CLIENT AUTHENTICATION, the fix
+// candidate for the relay's open door (finding R1 in RELAY-RESULTS): the
+// server holds an allow-list of relay client fingerprints (guarded delivery of
+// client_pk, the mirror image of the client's ServerPin) and the client signs
+// its hello with its identity key; the server verifies before encapsulating.
+// This is the relay-side twin of the gateway's B6 (ClientHelloV3.hello_sig).
+// Not implemented in src/relay.rs as of 2026-09-12.
+
+attacker[active]
+
+principal Server[
+    knows public label_c2s, label_s2c
+    knows private server_sk
+    server_pk = PUBKEY(server_sk)
+    generates server_random
+]
+
+principal Client[
+    knows public label_c2s, label_s2c
+    knows private client_sk
+    client_pk = PUBKEY(client_sk)
+    generates client_random
+    generates kem_sk
+    kem_ek = PUBKEY(kem_sk)
+    hello_sig = SIGN(client_sk, HASH(client_random, kem_ek))
+]
+
+Server -> Client: [server_pk]
+Client -> Server: [client_pk]
+Client -> Server: client_random, kem_ek, hello_sig
+
+principal Server[
+    _ = SIGNVERIF(client_pk, HASH(client_random, kem_ek), hello_sig)?
+    generates kem_r
+    kem_ss, kem_ct = KEM_ENCAP(kem_ek, kem_r)
+    transcript_s = HASH(HASH(client_random, server_random, kem_ek), kem_ct, client_pk, server_pk)
+    transcript_sig = SIGN(server_sk, transcript_s)
+    key_s2c_s = HASH(label_s2c, kem_ss, transcript_s)
+    key_c2s_s = HASH(label_c2s, kem_ss, transcript_s)
+]
+
+Server -> Client: server_random, kem_ct, transcript_sig
+
+principal Client[
+    kem_ss_c = KEM_DECAP(kem_sk, kem_ct)
+    transcript_c = HASH(HASH(client_random, server_random, kem_ek), kem_ct, client_pk, server_pk)
+    _ = SIGNVERIF(server_pk, transcript_c, transcript_sig)?
+    key_c2s_c = HASH(label_c2s, kem_ss_c, transcript_c)
+    key_s2c_c = HASH(label_s2c, kem_ss_c, transcript_c)
+]
+
+queries[
+    confidentiality? key_s2c_s
+    confidentiality? key_c2s_s
+    confidentiality? key_c2s_c
+    confidentiality? key_s2c_c
+    authentication? Server -> Client: transcript_sig
+    authentication? Client -> Server: hello_sig
+]

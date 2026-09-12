@@ -51,6 +51,20 @@
 //! Running unpinned is an explicit choice (`PinPolicy::Unpinned`) and is logged
 //! at WARN on every handshake. The relay carries no QKD key, so without the pin
 //! there is no second leg to fall back on.
+//!
+//! # Client authentication: none yet
+//!
+//! The server accepts any `RelayHello`. The client's `falcon_vk` is carried,
+//! length-checked and bound into the transcript, but checked against nothing,
+//! and the hello is signed by nobody. Anyone who can reach a relay server port
+//! can open a post-quantum tunnel to its backend (Verifpal finding R1,
+//! `formal/RELAY-RESULTS-2026-09-12.md`). In the QuantumHarmony deployment the
+//! backend is a validator's p2p port and libp2p's `--reserved-only` peer check
+//! is the actual gate; the per-source connection cap and the handshake timeout
+//! bound what a stranger's handshake costs. For any other backend, treat the
+//! relay server port as an open door until backlog B10 lands: a server-side
+//! allow-list of client fingerprints plus a client-signed hello, which the
+//! `pqtg-relay-handshake-clientauth.vp` model shows closes it.
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};

@@ -34,15 +34,12 @@ const HASH_ALG: SignAlgorithm = SignAlgorithm::SlhDsaShake128f;
 const SESSION_KDF_LABEL: &[u8] = b"pqtg-session-v2";
 const KEY_MIXING_LABEL: &[u8] = b"pqtg-key-mixing-v2";
 
-// v3 labels (PROTOCOL-V3-QKD-KEYID.md §4). v3 binds the ETSI 014 `key_ID`,
-// negotiated key mode, master SAE-ID and QKD key length under the Falcon-512
-// transcript signature, closing the unbound-key-ID gap analyzed in
-// docs/audit-vs-eprint-2025-1671.md (Hövelmanns et al., dependent-key attacks).
-const SESSION_KDF_LABEL_V3: &[u8] = b"pqtg-session-v3";
-const KEY_MIXING_LABEL_V3: &[u8] = b"pqtg-key-mixing-v3";
-const TRANSCRIPT_LABEL_V3: &[u8] = b"pqtg-transcript-v3";
-/// Domain of the client's hello signature (backlog B6, Verifpal finding F1).
-const CLIENT_HELLO_LABEL_V3: &[u8] = b"pqtg-client-hello-v3";
+// v3 (PROTOCOL-V3-QKD-KEYID.md §4) binds the ETSI 014 `key_ID`, negotiated
+// key mode, master SAE-ID and QKD key length under the Falcon-512 transcript
+// signature, closing the unbound-key-ID gap analyzed in
+// docs/audit-vs-eprint-2025-1671.md. Since wire 3.1 its hashes and its key
+// schedule use the domain tree and keyed chain in `crate::kdf` (backlog B2/B3);
+// the flat v2 labels above stay as they are for the v2 clients that exist.
 
 // ── Algorithm-specific byte lengths (FIPS 203/205, Falcon submission) ────────
 //
@@ -349,26 +346,20 @@ pub fn transcript_hash_v3(
     master_sae_id: &[u8],
     qkd_key_len: u32,
 ) -> [u8; 32] {
-    let mut h = Sha3_256::new();
-    h.update(TRANSCRIPT_LABEL_V3);
-    h.update(client_random);
-    h.update(server_random);
-    h.update((client_kem_ek.len() as u32).to_be_bytes());
-    h.update(client_kem_ek);
-    h.update((server_falcon_pk.len() as u32).to_be_bytes());
-    h.update(server_falcon_pk);
-    h.update((kem_ciphertext.len() as u32).to_be_bytes());
-    h.update(kem_ciphertext);
-    h.update([key_mode_byte]);
-    h.update((qkd_key_id.len() as u32).to_be_bytes());
-    h.update(qkd_key_id);
-    h.update((master_sae_id.len() as u32).to_be_bytes());
-    h.update(master_sae_id);
-    h.update(qkd_key_len.to_be_bytes());
-    let digest = h.finalize();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&digest);
-    out
+    crate::kdf::hash(
+        &crate::kdf::GATEWAY_V3_TRANSCRIPT,
+        &[
+            client_random,
+            server_random,
+            client_kem_ek,
+            server_falcon_pk,
+            kem_ciphertext,
+            &[key_mode_byte],
+            qkd_key_id,
+            master_sae_id,
+            &qkd_key_len.to_be_bytes(),
+        ],
+    )
 }
 
 /// v3 ClientHello digest, signed by the client's Falcon-512 identity key as
@@ -396,63 +387,55 @@ pub fn client_hello_digest_v3(
     client_sae_id: &[u8],
     qkd_capable: bool,
 ) -> [u8; 32] {
-    let mut h = Sha3_256::new();
-    h.update(CLIENT_HELLO_LABEL_V3);
-    h.update(client_random);
-    h.update(timestamp.to_be_bytes());
-    h.update((kem_ek.len() as u32).to_be_bytes());
-    h.update(kem_ek);
-    h.update((falcon_vk.len() as u32).to_be_bytes());
-    h.update(falcon_vk);
-    h.update((slh_dsa_vk.len() as u32).to_be_bytes());
-    h.update(slh_dsa_vk);
-    h.update(requested_key_size.to_be_bytes());
-    h.update((client_sae_id.len() as u32).to_be_bytes());
-    h.update(client_sae_id);
-    h.update([u8::from(qkd_capable)]);
-    let digest = h.finalize();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&digest);
-    out
+    crate::kdf::hash(
+        &crate::kdf::GATEWAY_V3_CLIENT_HELLO,
+        &[
+            client_random,
+            &timestamp.to_be_bytes(),
+            kem_ek,
+            falcon_vk,
+            slh_dsa_vk,
+            &requested_key_size.to_be_bytes(),
+            client_sae_id,
+            &[u8::from(qkd_capable)],
+        ],
+    )
 }
 
-/// v3 session-key derivation — identical shape to v2 under the v3 label, so
-/// v2 and v3 sessions can never collide even on identical inputs.
-pub fn derive_session_key_v3(secret: &[u8; 32], transcript: &[u8; 32]) -> [u8; 32] {
-    let mut h = Sha3_256::new();
-    h.update(SESSION_KDF_LABEL_V3);
-    h.update(secret);
-    h.update(transcript);
-    let digest = h.finalize();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&digest);
-    out
-}
-
-/// v3 hybrid combiner with context binding (CatKDF-style: concatenated
-/// secrets plus a context structure under a domain-separated KDF).
+/// v3 session key: a keyed chain (backlog B3), replacing the former
+/// `mix_keys_v3` + `derive_session_key_v3` pair (wire 3.0).
 ///
-/// `context` is the v3 transcript hash, which already commits the ETSI 014
-/// `key_ID`, negotiated key mode, master SAE-ID, QKD key length, both
-/// randoms, the KEM EK/CT and the server identity — so the combined secret
-/// is bound to exactly one session and one QKD key. This closes the
-/// "key ID as unbound metadata" finding (docs/audit-vs-eprint-2025-1671.md).
+/// ```text
+/// ck  = SHA3-256(D[gateway/v3/chain])
+/// ck  = HMAC-SHA3-256(ck, D[gateway/v3/mix/kem]        ‖ len ‖ kem_ss)
+/// ck  = HMAC-SHA3-256(ck, D[gateway/v3/mix/qkd]        ‖ len ‖ qkd_bytes)   (Hybrid only)
+/// ck  = HMAC-SHA3-256(ck, D[gateway/v3/mix/transcript] ‖ len ‖ transcript)
+/// key = HMAC-SHA3-256(ck, D[gateway/v3/session-key])
+/// ```
 ///
-/// Note: hashing the QKD key is computationally secure (SHA3), which matches
-/// PQTG's quantum-safe-transport claim. It does NOT preserve information-
-/// theoretic security of the QKD key — do not claim ITS for the mixed key
-/// (see the audit note on the eprint 2025/1671 split-key/OTP construction).
-pub fn mix_keys_v3(qkd_key: &[u8], pqc_key: &[u8; 32], context: &[u8; 32]) -> [u8; 32] {
-    let mut h = Sha3_256::new();
-    h.update(KEY_MIXING_LABEL_V3);
-    h.update((qkd_key.len() as u32).to_be_bytes());
-    h.update(qkd_key);
-    h.update(pqc_key);
-    h.update(context);
-    let digest = h.finalize();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&digest);
-    out
+/// Every secret enters through a PRF keyed by the running chain, never a bare
+/// hash; the order of inputs is bound; PqcOnly and Hybrid differ by a whole
+/// step, so no PqcOnly key equals any Hybrid key. The transcript (which commits
+/// the ETSI 014 `key_ID`, negotiated mode, master SAE-ID and QKD key length)
+/// is the context that binds the key to exactly one session and one QKD key
+/// (docs/audit-vs-eprint-2025-1671.md).
+///
+/// Note: mixing the QKD key through a PRF is computationally secure, which
+/// matches PQTG's quantum-safe-transport claim. It does NOT preserve the
+/// information-theoretic security of the QKD key; do not claim ITS for the
+/// derived key.
+pub fn derive_v3_session_key(
+    kem_ss: &[u8; 32],
+    qkd_bytes: Option<&[u8]>,
+    transcript: &[u8; 32],
+) -> [u8; 32] {
+    use crate::kdf::{self, Chain};
+    let mut ck = Chain::start(&kdf::GATEWAY_V3_CHAIN).mix(&kdf::GATEWAY_V3_MIX_KEM, kem_ss);
+    if let Some(q) = qkd_bytes {
+        ck = ck.mix(&kdf::GATEWAY_V3_MIX_QKD, q);
+    }
+    ck.mix(&kdf::GATEWAY_V3_MIX_TRANSCRIPT, transcript)
+        .finish(&kdf::GATEWAY_V3_SESSION_KEY)
 }
 
 pub fn random_bytes<const N: usize>() -> [u8; N] {
@@ -1094,35 +1077,40 @@ mod tests {
         assert_ne!(v2, v3);
     }
 
-    /// The v3 combiner is context-sensitive: same secrets, different session
-    /// context ⇒ different combined key (the CatKDF-style binding).
+    /// The v3 chain binds every input and the mode: PqcOnly vs Hybrid, the
+    /// QKD bytes, the KEM secret and the transcript each change the key.
     #[test]
-    fn v3_key_mixing_is_sensitive_to_context() {
-        let qkd = vec![0x11u8; 32];
-        let pqc = [0x22u8; 32];
-        let m1 = mix_keys_v3(&qkd, &pqc, &[0xC1; 32]);
-        let m2 = mix_keys_v3(&qkd, &pqc, &[0xC2; 32]);
-        assert_ne!(m1, m2, "combiner must bind the session context");
+    fn v3_session_key_binds_each_input_and_the_mode() {
+        let ss = [0x22u8; 32];
+        let t = [0x33u8; 32];
+        let q = vec![0x11u8; 32];
+        let pqc_only = derive_v3_session_key(&ss, None, &t);
+        let hybrid = derive_v3_session_key(&ss, Some(&q), &t);
+        assert_ne!(pqc_only, hybrid, "mode is a whole chain step");
+        assert_ne!(hybrid, derive_v3_session_key(&ss, Some(&[0x12u8; 32]), &t));
+        assert_ne!(pqc_only, derive_v3_session_key(&[0x23u8; 32], None, &t));
+        assert_ne!(pqc_only, derive_v3_session_key(&ss, None, &[0x34u8; 32]));
+        assert_eq!(
+            hybrid,
+            derive_v3_session_key(&ss, Some(&q), &t),
+            "deterministic"
+        );
     }
 
-    /// v3 combiner and v2 combiner are domain-separated even with equal inputs.
+    /// v3 (keyed chain) and v2 (flat SHA3 labels) never coincide on equal
+    /// inputs, in either mode.
     #[test]
-    fn v3_key_mixing_domain_separated_from_v2() {
-        let qkd = vec![0x11u8; 32];
-        let pqc = [0x22u8; 32];
-        let v2 = mix_keys(&qkd, &pqc);
-        let v3 = mix_keys_v3(&qkd, &pqc, &[0u8; 32]);
-        assert_ne!(v2, v3);
-    }
-
-    /// v2/v3 session KDF label separation.
-    #[test]
-    fn v3_session_kdf_domain_separated_from_v2() {
-        let secret = [0x77u8; 32];
-        let transcript = [0x88u8; 32];
+    fn v3_session_key_domain_separated_from_v2() {
+        let ss = [0x77u8; 32];
+        let t = [0x88u8; 32];
+        let q = vec![0x11u8; 32];
         assert_ne!(
-            derive_session_key(&secret, &transcript),
-            derive_session_key_v3(&secret, &transcript)
+            derive_v3_session_key(&ss, None, &t),
+            derive_session_key(&ss, &t)
+        );
+        assert_ne!(
+            derive_v3_session_key(&ss, Some(&q), &t),
+            derive_session_key(&mix_keys(&q, &ss), &t)
         );
     }
 

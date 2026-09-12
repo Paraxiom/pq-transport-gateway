@@ -11,6 +11,7 @@ mod audit;
 mod auth;
 mod config;
 mod crypto;
+mod kdf;
 mod proxy;
 mod qkd_client;
 mod relay;

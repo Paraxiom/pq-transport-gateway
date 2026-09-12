@@ -14,9 +14,9 @@ use crate::{
     auth::Authenticator,
     config::Config,
     crypto::{
-        derive_session_key, derive_session_key_v3, encapsulate_to, mix_keys, mix_keys_v3,
-        random_bytes, transcript_hash, transcript_hash_v3, PqKeyExchange, PqSession,
-        FALCON_512_VK_LEN, MIN_SESSION_FRAME_BYTES, ML_KEM_768_EK_LEN, SLH_DSA_SHAKE128F_VK_LEN,
+        derive_session_key, derive_v3_session_key, encapsulate_to, mix_keys, random_bytes,
+        transcript_hash, transcript_hash_v3, PqKeyExchange, PqSession, FALCON_512_VK_LEN,
+        MIN_SESSION_FRAME_BYTES, ML_KEM_768_EK_LEN, SLH_DSA_SHAKE128F_VK_LEN,
     },
     qkd_client::QkdClient,
     replay::{ReplayGuard, Verdict},
@@ -271,7 +271,10 @@ pub struct KeyMetadata {
 }
 
 const PROTOCOL_VERSION: &str = "2.0";
-const PROTOCOL_VERSION_V3: &str = "3.0";
+/// 3.1: the v3 hashes and key schedule moved to the domain tree and keyed
+/// chain in `crate::kdf` (backlog B2/B3). A 3.0 peer would derive different
+/// keys; no external 3.0 client exists.
+const PROTOCOL_VERSION_V3: &str = "3.1";
 const MAX_HELLO_BYTES: usize = 16 * 1024;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 /// Sanity cap on the client-supplied SAE-ID (ETSI 014 SAE_IDs are short
@@ -484,18 +487,18 @@ impl ServerHandshake<HelloAcceptedV3> {
         &self.state.server_hello
     }
 
-    /// Derive the v3 session. Hybrid: `mix_keys_v3(qkd, pqc, transcript)` —
-    /// the combiner's context input is the v3 transcript, which commits the
-    /// key_ID, mode, SAE-ID and length (CatKDF-style context binding; see
-    /// docs/audit-vs-eprint-2025-1671.md). PqcOnly: the KEM secret directly.
-    /// Consumes `self`; the only constructor of a live v3 session.
+    /// Derive the v3 session through the keyed chain
+    /// (`crypto::derive_v3_session_key`): KEM secret, then the QKD bytes in
+    /// Hybrid mode, then the transcript, which commits the key_ID, mode,
+    /// SAE-ID and length (docs/audit-vs-eprint-2025-1671.md). Consumes
+    /// `self`; the only constructor of a live v3 session.
     pub fn into_session(self) -> Result<(PqSession, Vec<u8>)> {
         let s = self.state;
-        let secret = match &s.qkd_material {
-            Some(m) => mix_keys_v3(m, &s.pqc_secret, &s.transcript),
-            None => s.pqc_secret,
-        };
-        let session_key = derive_session_key_v3(&secret, &s.transcript);
+        let session_key = derive_v3_session_key(
+            &s.pqc_secret,
+            s.qkd_material.as_ref().map(|m| m.as_slice()),
+            &s.transcript,
+        );
         let session = PqSession::new(
             &session_key,
             random_bytes::<32>(),
@@ -1008,8 +1011,7 @@ mod tests {
             "v3 transcript signature must verify"
         );
         let client_ss = client_kem.decapsulate(&sh.kem_ciphertext).unwrap();
-        let secret = mix_keys_v3(&qkd_bytes, &client_ss, &transcript);
-        let client_key = derive_session_key_v3(&secret, &transcript);
+        let client_key = derive_v3_session_key(&client_ss, Some(&qkd_bytes), &transcript);
         let client_session =
             PqSession::new(&client_key, random_bytes::<32>(), sh.falcon_vk.clone()).unwrap();
 
@@ -1040,7 +1042,7 @@ mod tests {
             PqKeyExchange::verify_falcon(&transcript, &sh.transcript_sig, &sh.falcon_vk).unwrap()
         );
         let client_ss = client_kem.decapsulate(&sh.kem_ciphertext).unwrap();
-        let client_key = derive_session_key_v3(&client_ss, &transcript);
+        let client_key = derive_v3_session_key(&client_ss, None, &transcript);
         let client_session =
             PqSession::new(&client_key, random_bytes::<32>(), sh.falcon_vk.clone()).unwrap();
 

@@ -75,6 +75,8 @@ Both legs leaked at once is expected to fail and was not run.
 
 Keep this model in lockstep with `src/crypto.rs`/`src/proxy.rs`: if the handshake changes, the model and this mapping change with it, or the proof is fiction.
 
+**Key schedule change, 2026-09-12 (wire `3.1`, `relay-4`, backlog B2/B3).** The implementation moved every v3 and relay hash to a domain tree and every key derivation to a keyed PRF and chaining key (`src/kdf.rs`, `docs/KEY-SCHEDULE.md`). The models abstract each derivation as a one-way function of its inputs with distinct label constants; they do not depend on the concrete constants or on keyed versus unkeyed hashing, and the same secrets still enter the same derivations in the same order. The symbolic shape is therefore unchanged and the results in this directory stand for `3.1` and `relay-4` as written; no model was re-run for this change. The binding between the models and the code is kept by the known-answer vectors (`tests/kdf_kat.rs`).
+
 ## Relay handshake (added 2026-09-12)
 
 The relay (`src/relay.rs`) is a different protocol from the gateway handshake: six-input transcript including the client's Falcon vk, two directional keys, no QKD leg. Its models and results live alongside:
@@ -83,7 +85,7 @@ The relay (`src/relay.rs`) is a different protocol from the gateway handshake: s
 |---|---|
 | `pqtg-relay-handshake.vp` | `relay-1` (superseded): pinned server, unauthenticated client |
 | `pqtg-relay-handshake-nopin.vp` | pin removed (`PinPolicy::Unpinned`) |
-| `pqtg-relay-handshake-clientauth.vp` | **the shipped relay (`relay-2`)**: server allow-list + client-signed hello (B10, done) |
+| `pqtg-relay-handshake-clientauth.vp` | **the shipped relay handshake (`relay-2` onward, now `relay-4`)**: server allow-list + client-signed hello (B10, done) |
 | `pqtg-relay-handshake-fs.vp`, `-clientauth-fs.vp` | forward secrecy: long-term keys leak in phase 1 |
 | `RELAY-RESULTS-2026-09-12.md` | results, findings R1–R4, wording |
 | `pqtg-relay-ratchet.vp`, `-leak-k2.vp`, `-leak-k0.vp` | the record-layer hash ratchet (`DirectionalCipher`), three epochs; current-key and early-key leaks |

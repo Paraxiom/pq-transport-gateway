@@ -1,0 +1,26 @@
+{
+  "_about": "Generated independently (Python hashlib SHA3-256 + hmac) from docs/KEY-SCHEDULE.md. Byte-pattern inputs are NOT valid keys, only hashed. Rust: tests/kdf_kat.rs.",
+  "inputs": {
+    "client_random": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "server_random": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "kem_ek": "byte[i]=(7i+3)&255, 1184 bytes",
+    "kem_ct": "byte[i]=(11i+9)&255, 1088 bytes",
+    "client_falcon_vk": "byte[i]=(17i+1)&255, 897 bytes",
+    "server_falcon_vk": "byte[i]=(13i+5)&255, 897 bytes",
+    "slh_dsa_vk": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+    "timestamp": 1789000000,
+    "kem_ss": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f"
+  },
+  "expected": {
+    "hello_digest": "f0adf0703d30d83e354b4025f365960e3a4c05fd199bd0d8102885748b73ac95",
+    "transcript": "ee0559a42d76a757f77752c7488d2ff92fcba47d246313fc4157ca6253b885bf",
+    "key_c2s": "34429194aefebcfcfdcff393c588e5b287cd1eebc0d484d10cec1cd621950d93",
+    "key_s2c": "5206f167eddf3fb7e0bb6995fd67da29910d07b197f81a6f6d91fe46db1c69bf",
+    "ratchet_epoch1_hash_only_from_c2s": "a6f8a562479274817d866f94a1286f57545c47c194d17b3576fab1439651cd75",
+    "ratchet_epoch2_with_fresh_kem_ss_from_epoch1": "c14e9e7ae1d6a0117d43bdccbe05922c63b6272d6d34ab47f8a1ee5b62c9e430"
+  },
+  "rules": {
+    "directional_key": "HMAC(kem_ss, D[key/dir]||len||transcript)",
+    "ratchet": "HMAC(k_n, D[ratchet]||len(4)||be32(n+1)||len||fresh)"
+  }
+}

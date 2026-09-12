@@ -72,7 +72,7 @@ link; it negotiates **PQC-only** (§5).
 
 ```diff
  pub struct ClientHello {
-     pub version: String,              // "3.0"
+     pub version: String,              // "3.1" (3.0 = flat labels, not kept)
      pub client_random: [u8; 32],
      pub kem_ek: Vec<u8>,
      pub falcon_vk: Vec<u8>,
@@ -89,9 +89,10 @@ link; it negotiates **PQC-only** (§5).
 +    /// 120) from its own clock, in either direction (2026-09-12, B8).
 +    pub timestamp: u64,
 +    /// Falcon-512 signature by the client's identity key (the one falcon_vk
-+    /// names) over SHA3-256("pqtg-client-hello-v3" ‖ client_random
-+    /// ‖ timestamp_be_u64 ‖ len‖kem_ek ‖ len‖falcon_vk ‖ len‖slh_dsa_vk
-+    /// ‖ requested_key_size_be_u64 ‖ len‖client_sae_id ‖ qkd_capable_byte).
++    /// names) over SHA3-256(D[gateway/v3/client-hello] ‖ len‖client_random
++    /// ‖ len‖timestamp_be_u64 ‖ len‖kem_ek ‖ len‖falcon_vk ‖ len‖slh_dsa_vk
++    /// ‖ len‖requested_key_size_be_u64 ‖ len‖client_sae_id
++    /// ‖ len‖qkd_capable_byte), see docs/KEY-SCHEDULE.md.
 +    /// Proof of possession of the allow-listed key, and binds THIS kem_ek to
 +    /// it (2026-09-12, closes Verifpal finding F1;
 +    /// formal/CLIENTAUTH-RESULTS-2026-09-12.md).
@@ -99,7 +100,7 @@ link; it negotiates **PQC-only** (§5).
  }
 
  pub struct ServerHello {
-     pub version: String,              // "3.0"
+     pub version: String,              // "3.1"
      pub server_random: [u8; 32],
      pub falcon_vk: Vec<u8>,
      pub slh_dsa_vk: Vec<u8>,
@@ -127,26 +128,41 @@ Framing is unchanged: `[len:u32 BE][bincode struct]`.
 ## 4. Transcript & KDF (bind the key_id under the signature)
 
 The `key_ID` must be covered by the server's Falcon-512 signature so a MITM
-cannot substitute a key_id it *can* fetch. Bump both domain-separation labels.
+cannot substitute a key_id it *can* fetch.
+
+Since wire `3.1` (2026-09-12, backlog B2/B3) every v3 hash and key derivation
+uses the domain tree and keyed schedule specified in `docs/KEY-SCHEDULE.md`.
+`D[path]` is the 32-byte constant for that path; `len ‖ x` is a big-endian
+u32 length prefix followed by `x`, applied to every part, fixed-size ones
+included.
 
 ```
-transcript = SHA3-256("pqtg-transcript-v3"
-                      ‖ client_random ‖ server_random
-                      ‖ len(ek) ‖ ek
-                      ‖ len(server_falcon_vk) ‖ server_falcon_vk
-                      ‖ len(ct) ‖ ct
-                      ‖ key_mode_byte                       // 0x01 Hybrid, 0x00 PqcOnly
-                      ‖ len(qkd_key_id) ‖ qkd_key_id        // empty in PqcOnly
-                      ‖ len(master_sae_id) ‖ master_sae_id
-                      ‖ qkd_key_len_be_u32)
+transcript = SHA3-256(D[gateway/v3/transcript]
+                      ‖ len ‖ client_random ‖ len ‖ server_random
+                      ‖ len ‖ ek
+                      ‖ len ‖ server_falcon_vk
+                      ‖ len ‖ ct
+                      ‖ len ‖ key_mode_byte                 // 0x01 Hybrid, 0x00 PqcOnly
+                      ‖ len ‖ qkd_key_id                    // empty in PqcOnly
+                      ‖ len ‖ master_sae_id
+                      ‖ len ‖ qkd_key_len_be_u32)           // 0 in PqcOnly
 
-session_key = SHA3-256("pqtg-session-v3" ‖ secret ‖ transcript)
-   where secret = mix_keys(qkd_bytes, kem_ss)   if key_mode == Hybrid
-                = kem_ss                          if key_mode == PqcOnly
+ck          = SHA3-256(D[gateway/v3/chain])
+ck          = HMAC-SHA3-256(ck, D[gateway/v3/mix/kem]        ‖ len ‖ kem_ss)
+ck          = HMAC-SHA3-256(ck, D[gateway/v3/mix/qkd]        ‖ len ‖ qkd_bytes)   // Hybrid only
+ck          = HMAC-SHA3-256(ck, D[gateway/v3/mix/transcript] ‖ len ‖ transcript)
+session_key = HMAC-SHA3-256(ck, D[gateway/v3/session-key])
 ```
 
-`mix_keys` itself is unchanged (`src/crypto.rs::mix_keys`, already length-prefixes
-the QKD key). Only the labels and the extra transcript fields are new.
+Secrets never enter a bare hash: each is mixed through a PRF keyed by the
+running chain (`src/kdf.rs::Chain`, `src/crypto.rs::derive_v3_session_key`).
+PqcOnly and Hybrid differ by a whole chain step, so no PqcOnly key can equal
+a Hybrid key, and the transcript step binds the key to the negotiated mode,
+`key_ID`, master SAE-ID and QKD key length. Wire `3.0` used flat labels
+(`pqtg-transcript-v3`, `pqtg-session-v3`) and the v2 `mix_keys` combiner; it
+is not kept. The v2 schedule (`src/crypto.rs::mix_keys`, `derive_session_key`)
+is unchanged, the KirQ Phase 1 client speaks it. Known-answer vectors:
+`tests/vectors/handshake-v3.json`, checked by `tests/kdf_kat.rs`.
 
 ---
 
@@ -194,13 +210,13 @@ client                              PQTG (master SAE 101)            KMS (via mT
   │◄──────────────────────────────────┤                              │
   │ pin-check, verify sig, kem_ss = decap(ct)                        │
   │ dec_keys(master=101, [key_ID]) at client's KME ──► key_bytes      │
-  │ session_key = SHA3(v3 ‖ mix_keys(key_bytes, kem_ss) ‖ transcript) │
+  │ session_key = chain(kem_ss, key_bytes, transcript), see §4        │
   │                                   │ session_key = same            │
   │ ===== AES-256-GCM application channel now interoperates =====     │
 ```
 
-PqcOnly is identical minus the `enc_keys`/`dec_keys` calls and with
-`secret = kem_ss`.
+PqcOnly is identical minus the `enc_keys`/`dec_keys` calls and without the
+QKD chain step (§4).
 
 ---
 
@@ -244,6 +260,12 @@ PqcOnly is identical minus the `enc_keys`/`dec_keys` calls and with
   client and the server refuses that client (a configuration matter, logged).
   This is a stateful mitigation; the symbolic model cannot express it, so the
   Verifpal injectivity query on `hello_sig` stays FAIL by construction.
+- **Key schedule (wire `3.1`, 2026-09-12).** Every v3 hash carries a domain
+  constant from one tree, and every secret enters the session key through a
+  PRF keyed by a running chain rather than a one-shot hash (§4,
+  `docs/KEY-SCHEDULE.md`). The change is to constants and keying, not to
+  which inputs are bound, so the symbolic results in `formal/` stand
+  unchanged; the vectors in `tests/vectors/` tie the models to the code.
 
 ---
 

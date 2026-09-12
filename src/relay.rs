@@ -68,10 +68,19 @@
 //! (`formal/pqtg-relay-handshake-clientauth.vp`) passes every confidentiality
 //! and server-authentication query; the replay guard is a stateful measure the
 //! symbolic model does not express.
+//!
+//! # Key schedule (`relay-4`)
+//!
+//! Every relay hash takes a domain constant from the tree in `crate::kdf`
+//! (`relay/v4/...`) and every secret goes through a keyed PRF, never a bare
+//! hash: the two directional keys are `HMAC-SHA3-256(kem_ss, D[relay/v4/key/dir]
+//! ‖ transcript)` and each ratchet step is `HMAC-SHA3-256(k_n, D[relay/v4/ratchet]
+//! ‖ n+1 ‖ fresh)`. The construction is specified in `docs/KEY-SCHEDULE.md`
+//! and pinned by `tests/kdf_kat.rs` against vectors from an independent
+//! implementation.
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
-use sha3::{Digest, Sha3_256};
 use socket2::{SockRef, TcpKeepalive};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -87,6 +96,7 @@ use crate::crypto::{
     EphemeralKemKey, PqKeyExchange, FALCON_512_VK_LEN, ML_KEM_768_CT_LEN, ML_KEM_768_EK_LEN,
     SLH_DSA_SHAKE128F_VK_LEN,
 };
+use crate::kdf;
 use crate::replay::{ReplayGuard, Verdict};
 
 /// Relay wire version. Distinct from the gateway protocol's "2.0" so the two
@@ -96,15 +106,14 @@ use crate::replay::{ReplayGuard, Verdict};
 /// unauthenticated. `relay-3` added the KEM re-injection into the record-layer
 /// ratchet (typed records); a `relay-2` peer would misparse records, so it is
 /// refused at the version check too.
-pub const RELAY_VERSION: &str = "relay-3";
+/// `relay-4`: hashes and the key schedule moved to the domain tree and keyed
+/// PRF in `crate::kdf` (backlog B2/B3); a `relay-3` peer would derive
+/// different keys and is refused at the version check.
+pub const RELAY_VERSION: &str = "relay-4";
 
-/// Domain separator for the relay transcript. Keeps relay handshake signatures
-/// disjoint from gateway handshake signatures made with the same Falcon key.
-const RELAY_TRANSCRIPT_LABEL: &[u8] = b"PQTG-RELAY-TRANSCRIPT-v1\x00";
-
-/// Domain separator for the client's hello signature. Disjoint from the
-/// transcript label and from the gateway's `pqtg-client-hello-v3`.
-const RELAY_HELLO_LABEL: &[u8] = b"PQTG-RELAY-HELLO-v2\x00";
+// Hash and PRF domains for the relay live in `crate::kdf` (the `relay/v4/*`
+// paths), so relay signatures, keys and ratchet steps can never collide with
+// each other or with the gateway's.
 
 /// Freshness window for the signed hello timestamp, either direction. A
 /// recorded hello is worthless once the window has passed; inside it the
@@ -120,10 +129,6 @@ const HELLO_REPLAY_WINDOW: Duration = Duration::from_secs(2 * HELLO_MAX_SKEW_SEC
 /// allow-listed clients are ever inserted, so it cannot be filled by a
 /// stranger; sized for a few hundred handshakes per second over the window.
 const HELLO_REPLAY_CACHE_ENTRIES: usize = 65_536;
-
-/// Domain separators for the two directional keys.
-const KDF_LABEL_C2S: &[u8] = b"PQTG-RELAY-KEY-c2s-v1\x00";
-const KDF_LABEL_S2C: &[u8] = b"PQTG-RELAY-KEY-s2c-v1\x00";
 
 /// Largest handshake message accepted. A hello is about 2.2 KB; this leaves
 /// headroom without letting a peer force a large allocation before it has
@@ -149,10 +154,6 @@ const CHUNK_BYTES: usize = 64 * 1024;
 /// backlog B11; `formal/RATCHET-RESULTS-2026-09-12.md`). Without an offer in
 /// hand the step is hash-only and the second guarantee lapses for that epoch.
 const REKEY_EVERY_RECORDS: u64 = 65_536;
-
-/// Domain separator for the ratchet step. v2: the step also absorbs fresh
-/// ML-KEM material when the peer offered a key (backlog B11).
-const RATCHET_LABEL: &[u8] = b"PQTG-RELAY-RATCHET-v2\x00";
 
 /// Record types, the first byte of every AEAD plaintext. Control material rides
 /// inside ordinary sequenced records, so there is nothing to race and no
@@ -279,24 +280,23 @@ fn unix_now() -> u64 {
 
 /// What `RelayHello::hello_sig` signs: every hello field except the signature,
 /// variable-length fields length-prefixed, under the relay hello label.
-fn relay_hello_digest(
+pub fn relay_hello_digest(
     client_random: &[u8; 32],
     timestamp: u64,
     kem_ek: &[u8],
     falcon_vk: &[u8],
     slh_dsa_vk: &[u8],
 ) -> [u8; 32] {
-    let mut h = Sha3_256::new();
-    h.update(RELAY_HELLO_LABEL);
-    h.update(client_random);
-    h.update(timestamp.to_be_bytes());
-    for field in [kem_ek, falcon_vk, slh_dsa_vk] {
-        h.update((field.len() as u32).to_be_bytes());
-        h.update(field);
-    }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&h.finalize());
-    out
+    kdf::hash(
+        &kdf::RELAY_HELLO,
+        &[
+            client_random,
+            &timestamp.to_be_bytes(),
+            kem_ek,
+            falcon_vk,
+            slh_dsa_vk,
+        ],
+    )
 }
 
 impl RelayHello {
@@ -346,7 +346,7 @@ struct RelayServerHello {
 /// Hash everything both sides have seen, in a fixed order, under a relay
 /// specific label. Every variable-length field is length-prefixed so two
 /// different handshakes cannot produce the same transcript.
-fn relay_transcript(
+pub fn relay_transcript(
     client_random: &[u8; 32],
     server_random: &[u8; 32],
     kem_ek: &[u8],
@@ -354,28 +354,38 @@ fn relay_transcript(
     client_falcon_vk: &[u8],
     server_falcon_vk: &[u8],
 ) -> [u8; 32] {
-    let mut h = Sha3_256::new();
-    h.update(RELAY_TRANSCRIPT_LABEL);
-    h.update(client_random);
-    h.update(server_random);
-    for field in [kem_ek, kem_ct, client_falcon_vk, server_falcon_vk] {
-        h.update((field.len() as u32).to_be_bytes());
-        h.update(field);
-    }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&h.finalize());
-    out
+    kdf::hash(
+        &kdf::RELAY_TRANSCRIPT,
+        &[
+            client_random,
+            server_random,
+            kem_ek,
+            kem_ct,
+            client_falcon_vk,
+            server_falcon_vk,
+        ],
+    )
 }
 
-/// Derive one directional key from the shared secret and the transcript.
-fn derive_directional_key(secret: &[u8; 32], transcript: &[u8; 32], label: &[u8]) -> [u8; 32] {
-    let mut h = Sha3_256::new();
-    h.update(label);
-    h.update(secret);
-    h.update(transcript);
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&h.finalize());
-    out
+/// Derive one directional key: a PRF keyed by the shared secret, under the
+/// direction's domain, over the transcript (backlog B3).
+pub fn derive_directional_key(
+    secret: &[u8; 32],
+    transcript: &[u8; 32],
+    dir: &kdf::Domain,
+) -> [u8; 32] {
+    kdf::prf(secret, dir, &[transcript])
+}
+
+/// One ratchet step: a PRF keyed by the current epoch key, under the ratchet
+/// domain, over the next epoch number and the fresh ML-KEM material (empty on
+/// a hash-only step). Public so the published vectors can pin it.
+pub fn ratchet_step(key: &[u8; 32], next_epoch: u32, fresh: &[u8]) -> [u8; 32] {
+    kdf::prf(
+        key,
+        &kdf::RELAY_RATCHET,
+        &[&next_epoch.to_be_bytes(), fresh],
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -565,14 +575,9 @@ impl DirectionalCipher {
             anyhow!("ratchet epoch exhausted; the session must be re-established")
         })?;
 
-        let mut h = Sha3_256::new();
-        h.update(RATCHET_LABEL);
-        h.update(self.key);
-        h.update(next_epoch.to_be_bytes());
-        h.update((fresh.len() as u32).to_be_bytes());
-        h.update(fresh);
-        let mut next = [0u8; 32];
-        next.copy_from_slice(&h.finalize());
+        // PRF keyed by the current epoch key, over the epoch number and the
+        // fresh material (empty on a hash-only step).
+        let mut next = ratchet_step(&self.key, next_epoch, fresh);
 
         self.cipher = Aes256Gcm::new(&next.into());
         self.key.zeroize();
@@ -943,11 +948,11 @@ pub async fn client_handshake(
     let link = RekeyLink::new();
     Ok(RelaySession {
         send: DirectionalCipher::new(
-            &derive_directional_key(&secret, &transcript, KDF_LABEL_C2S),
+            &derive_directional_key(&secret, &transcript, &kdf::RELAY_KEY_C2S),
             link.clone(),
         ),
         recv: DirectionalCipher::new(
-            &derive_directional_key(&secret, &transcript, KDF_LABEL_S2C),
+            &derive_directional_key(&secret, &transcript, &kdf::RELAY_KEY_S2C),
             link,
         ),
         peer_falcon_vk: server_hello.falcon_vk,
@@ -1064,11 +1069,11 @@ pub async fn server_handshake(
     let link = RekeyLink::new();
     Ok(RelaySession {
         send: DirectionalCipher::new(
-            &derive_directional_key(&secret, &transcript, KDF_LABEL_S2C),
+            &derive_directional_key(&secret, &transcript, &kdf::RELAY_KEY_S2C),
             link.clone(),
         ),
         recv: DirectionalCipher::new(
-            &derive_directional_key(&secret, &transcript, KDF_LABEL_C2S),
+            &derive_directional_key(&secret, &transcript, &kdf::RELAY_KEY_C2S),
             link,
         ),
         peer_falcon_vk: hello.falcon_vk,
@@ -2150,14 +2155,7 @@ mod tests {
     /// Hash-only next key, computed the way `ratchet(&[])` does, to check that
     /// a real ratchet did NOT take this path.
     fn hash_only_next(key: &[u8; 32], next_epoch: u32) -> [u8; 32] {
-        let mut h = Sha3_256::new();
-        h.update(RATCHET_LABEL);
-        h.update(key);
-        h.update(next_epoch.to_be_bytes());
-        h.update(0u32.to_be_bytes());
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&h.finalize());
-        out
+        ratchet_step(key, next_epoch, &[])
     }
 
     // ---- KEM re-injection (backlog B11) ------------------------------------
@@ -2367,8 +2365,8 @@ mod tests {
     fn paired_ciphers_from_same_secret() -> (DirectionalCipher, DirectionalCipher) {
         let secret = [9u8; 32];
         let transcript = [3u8; 32];
-        let c2s = derive_directional_key(&secret, &transcript, KDF_LABEL_C2S);
-        let s2c = derive_directional_key(&secret, &transcript, KDF_LABEL_S2C);
+        let c2s = derive_directional_key(&secret, &transcript, &kdf::RELAY_KEY_C2S);
+        let s2c = derive_directional_key(&secret, &transcript, &kdf::RELAY_KEY_S2C);
         assert_ne!(c2s, s2c, "directional keys must differ");
         (
             DirectionalCipher::new(&c2s, RekeyLink::new()),

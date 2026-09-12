@@ -1,0 +1,37 @@
+{
+  "_about": "Generated independently (Python hashlib SHA3-256 + hmac) from docs/KEY-SCHEDULE.md. Byte-pattern inputs are NOT valid keys, only hashed. Rust: tests/kdf_kat.rs.",
+  "inputs": {
+    "client_random": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "server_random": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "client_kem_ek": "byte[i]=(7i+3)&255, 1184 bytes",
+    "server_falcon_pk": "byte[i]=(13i+5)&255, 897 bytes",
+    "kem_ciphertext": "byte[i]=(11i+9)&255, 1088 bytes",
+    "kem_ss": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "qkd_key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+    "slh_dsa_vk": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+    "timestamp": 1789000000,
+    "requested_key_size": 32,
+    "client_sae_id": "sae-102",
+    "qkd_capable": true,
+    "hybrid": {
+      "key_mode_byte": 1,
+      "qkd_key_id": "1e4d1e4d-aaaa-bbbb-cccc-0123456789ab",
+      "master_sae_id": "sae-101",
+      "qkd_key_len": 32
+    },
+    "pqc_only": {
+      "key_mode_byte": 0,
+      "qkd_key_id": "",
+      "master_sae_id": "sae-101",
+      "qkd_key_len": 0
+    }
+  },
+  "expected": {
+    "transcript_hybrid": "4c6f09f4515b9330dd571d6c6a565f7cda2db843823b4f0b3737b3ca7a4abdd4",
+    "transcript_pqc_only": "baf4980110b402a07934070f0934555afecd1441303937acfe0be0632316eaac",
+    "client_hello_digest": "88e83a097d7c62329c246da2c84d549ebacd46cacb85677812b7ee4ca3d95d0e",
+    "session_key_pqc_only": "1827195cc1028692cb9c016994fb45d523ae2e691cca9b417d62f893e3a3965e",
+    "session_key_hybrid": "5aaa2b1c93da0c06428fbb027658aeb03ce80fa444cac9d934b1a76884525184"
+  },
+  "chain": "ck=SHA3(D[chain]); ck=HMAC(ck,D[mix/kem]||len||ss); [ck=HMAC(ck,D[mix/qkd]||len||qkd)]; ck=HMAC(ck,D[mix/transcript]||len||t); key=HMAC(ck,D[session-key])"
+}

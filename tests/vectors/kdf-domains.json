@@ -1,0 +1,19 @@
+{
+  "_about": "Generated independently (Python hashlib SHA3-256 + hmac) from docs/KEY-SCHEDULE.md. Byte-pattern inputs are NOT valid keys, only hashed. Rust: tests/kdf_kat.rs.",
+  "root": "PQTG-DOMAIN-TREE-v1",
+  "rule": "D(root)=SHA3(root); D(parent/leaf)=SHA3(D(parent)||be32(len(leaf))||leaf)",
+  "domains": {
+    "gateway/v3/transcript": "273b98fe565af2c874bd0bb41e42e5ec84d4b426622edb470a75954f4a358325",
+    "gateway/v3/client-hello": "5d1a007b2520376be8af7fdac47e713b93356b2b7e943406a16d5d77caaca7b7",
+    "gateway/v3/chain": "6e7d9d215f3a18e44f2c96d1f7538640f55f04b7f5accc8eb07d747a55947527",
+    "gateway/v3/mix/kem": "1217df46c1ad75f8f14348103cc7f28e247532d308a04e89623170f38d0c3a3f",
+    "gateway/v3/mix/qkd": "0a3499d59e59c154ce53bebe12794524a68c5a64e50e9050289eaf2206aa1199",
+    "gateway/v3/mix/transcript": "0f4516498f9343ecf2ad6919abd93fa8ae46da0d371725eaea896fa00526ccc7",
+    "gateway/v3/session-key": "c1a555955f6ee374f8259c8363b8fa757268c4ef5eb7952e49c31acb33165b02",
+    "relay/v4/hello": "55b55938881ce340ebb66b15778afe18c445660a92fc6d5fda9e3c92f53a2cc0",
+    "relay/v4/transcript": "f545e7dd538e19a8d3975faef63c79623a011cef58350d5bc05eef3950a593f3",
+    "relay/v4/key/c2s": "b4bc32c3ef4d12d41285fe33fcca93c4e680dda3ce78d87a6254766db7beffb8",
+    "relay/v4/key/s2c": "19248e6c3e9f2891a1ccbece8eaa7361dc2333161ac09a8e44430a1b6df76fc9",
+    "relay/v4/ratchet": "3ba15e4fd162c9eef27a7880f250cc990ab9e0edf5ec2fcec01db79678df1ef4"
+  }
+}

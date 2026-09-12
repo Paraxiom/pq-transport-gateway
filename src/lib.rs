@@ -8,6 +8,7 @@ pub mod audit;
 pub mod auth;
 pub mod config;
 pub mod crypto;
+pub mod kdf;
 pub mod proxy;
 pub mod qkd_client;
 pub mod relay;

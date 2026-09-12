@@ -29,6 +29,9 @@ sha3 = "0.10"
 
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }
+# Already in the tree via tokio. Used directly for TCP keepalive, which tokio
+# does not expose on TcpStream. Pure Rust bindings, no C compiled.
+socket2 = "0.6"
 
 # Networking  
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json"] }

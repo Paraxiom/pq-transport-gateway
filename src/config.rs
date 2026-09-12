@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -10,6 +10,10 @@ pub struct Config {
     pub proxy: ProxyConfig,
     pub qkd: QkdConfig,
     pub security: SecurityConfig,
+    /// Post-quantum TCP relay. Optional and disabled by default, so an existing
+    /// gateway deployment is unaffected.
+    #[serde(default)]
+    pub relay: RelayConfig,
     #[serde(default)]
     pub performance: PerformanceConfig,
 }
@@ -125,6 +129,132 @@ pub struct PerformanceConfig {
     pub cache_ttl: u64,
 }
 
+/// Post-quantum TCP relay.
+///
+/// PQTG runs as an ETSI-014 gateway, a relay, or both. The relay parses nothing
+/// it carries, so it can front any TCP service. Disabled unless `mode` is set.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RelayConfig {
+    /// When true, run ONLY the post-quantum relay and do not start the ETSI-014
+    /// gateway (no proxy port bind, no vendor-API check). This is the drop-in
+    /// PQ sidecar deployment: front any TCP service, touch nothing else. Default
+    /// false so existing gateway deployments are unchanged.
+    #[serde(default)]
+    pub standalone: bool,
+
+    /// `off` (default), `server`, or `client`.
+    ///
+    /// `server` accepts post-quantum connections and forwards plaintext to
+    /// `backend`. `client` accepts plaintext locally and carries it to a remote
+    /// relay server at `remote`.
+    #[serde(default = "default_relay_mode")]
+    pub mode: String,
+    /// Address to listen on.
+    #[serde(default)]
+    pub listen: Option<SocketAddr>,
+    /// Server mode: where decrypted traffic is delivered.
+    #[serde(default)]
+    pub backend: Option<SocketAddr>,
+    /// Client mode: the remote relay server to carry traffic to.
+    #[serde(default)]
+    pub remote: Option<SocketAddr>,
+    /// Server mode: connections relayed at once before new ones are refused.
+    #[serde(default = "default_relay_max_connections")]
+    pub max_connections: usize,
+    /// Client mode: the relay server's identity fingerprint, `SHA3-256:<base64>`
+    /// as printed by `--print-fingerprint` on the server. Required unless
+    /// `allow_unpinned` is set: without it the client verifies the server's
+    /// signature under a key the server itself supplied, which authenticates
+    /// nobody (Verifpal finding F2, `formal/VERIFICATION-RESULTS-2026-09-12.md`).
+    #[serde(default)]
+    pub pin: Option<String>,
+    /// Client mode: run without a pin. Every handshake is logged at WARN. For
+    /// a bench on a link you already trust; never for a validator.
+    #[serde(default)]
+    pub allow_unpinned: bool,
+}
+
+fn default_relay_mode() -> String {
+    "off".to_string()
+}
+
+fn default_relay_max_connections() -> usize {
+    256
+}
+
+impl Default for RelayConfig {
+    fn default() -> Self {
+        Self {
+            standalone: false,
+            mode: default_relay_mode(),
+            listen: None,
+            backend: None,
+            remote: None,
+            max_connections: default_relay_max_connections(),
+            pin: None,
+            allow_unpinned: false,
+        }
+    }
+}
+
+impl RelayConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.mode != "off"
+    }
+
+    /// The server-identity policy for client mode. A configured pin always
+    /// wins; `allow_unpinned` only matters when there is no pin.
+    pub fn pin_policy(&self) -> Result<crate::relay::PinPolicy> {
+        use crate::relay::{PinPolicy, ServerPin};
+        match &self.pin {
+            Some(pin) => Ok(PinPolicy::Require(ServerPin::parse(pin).map_err(|e| {
+                anyhow::anyhow!("relay.pin is not a valid fingerprint: {e}")
+            })?)),
+            None if self.allow_unpinned => Ok(PinPolicy::Unpinned),
+            None => anyhow::bail!(
+                "relay.mode = \"client\" requires relay.pin, the server's fingerprint from \
+                 `pq-qkd-proxy --print-fingerprint` (or relay.allow_unpinned = true, only for a \
+                 bench on a trusted link: an unpinned client cannot authenticate the server)"
+            ),
+        }
+    }
+
+    /// Reject a relay configuration that cannot work, at startup rather than on
+    /// the first connection. A relay that binds and then fails every request is
+    /// worse than one that refuses to start.
+    pub fn validate(&self) -> Result<()> {
+        match self.mode.as_str() {
+            "off" => Ok(()),
+            "server" => {
+                if self.listen.is_none() {
+                    anyhow::bail!("relay.mode = \"server\" requires relay.listen");
+                }
+                if self.backend.is_none() {
+                    anyhow::bail!("relay.mode = \"server\" requires relay.backend");
+                }
+                if self.max_connections == 0 {
+                    anyhow::bail!("relay.max_connections must be greater than zero");
+                }
+                Ok(())
+            }
+            "client" => {
+                if self.listen.is_none() {
+                    anyhow::bail!("relay.mode = \"client\" requires relay.listen");
+                }
+                if self.remote.is_none() {
+                    anyhow::bail!("relay.mode = \"client\" requires relay.remote");
+                }
+                // Refuse a missing or malformed pin at startup, not on the
+                // first connection.
+                self.pin_policy().map(|_| ())
+            }
+            other => anyhow::bail!(
+                "relay.mode must be \"off\", \"server\" or \"client\", got \"{other}\""
+            ),
+        }
+    }
+}
+
 impl Config {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path).context("Failed to read configuration file")?;
@@ -137,6 +267,8 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.relay.validate()?;
+
         // Ensure vendor API is localhost only
         if !self.qkd.vendor_api.contains("localhost")
             && !self.qkd.vendor_api.contains("127.0.0.1")
@@ -170,16 +302,87 @@ impl Config {
         Ok(())
     }
 
-    pub fn is_allowed_source(&self, _addr: &SocketAddr) -> bool {
+    /// Is this peer permitted to connect?
+    ///
+    /// An empty `allowed_sources` means no restriction, which is the documented
+    /// default. A NON-empty list is now actually enforced: until 2026-09-08 this
+    /// returned `true` unconditionally behind a TODO while being wired into the
+    /// accept loop, so every operator who configured an allowlist believed they
+    /// had one and did not. It failed open.
+    ///
+    /// Accepts bare addresses (`10.0.0.5`, `2001:db8::1`) and CIDR blocks
+    /// (`10.0.0.0/8`, `2001:db8::/32`). An entry that does not parse is refused
+    /// rather than ignored, so a typo cannot silently widen access.
+    pub fn is_allowed_source(&self, addr: &SocketAddr) -> bool {
         if self.proxy.allowed_sources.is_empty() {
-            // No restrictions
             return true;
         }
-
-        // Check against allowed sources
-        // TODO: Implement CIDR matching
-        true
+        self.proxy
+            .allowed_sources
+            .iter()
+            .any(|entry| source_matches(entry, addr.ip()))
     }
+}
+
+
+/// Does one allowlist entry cover this address?
+///
+/// Returns false for anything that does not parse. A malformed entry must never
+/// widen access: an operator who writes `10.0.0.0/33` should lose that rule, not
+/// gain a wildcard.
+fn source_matches(entry: &str, ip: IpAddr) -> bool {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return false;
+    }
+
+    let (net_str, prefix_str) = match entry.split_once('/') {
+        Some((n, p)) => (n, Some(p)),
+        None => (entry, None),
+    };
+
+    let Ok(net) = net_str.parse::<IpAddr>() else {
+        return false;
+    };
+
+    // A bare address is an exact match. Mixing families never matches.
+    let Some(prefix_str) = prefix_str else {
+        return net == ip;
+    };
+    let Ok(prefix) = prefix_str.parse::<u8>() else {
+        return false;
+    };
+
+    match (net, ip) {
+        (IpAddr::V4(net), IpAddr::V4(ip)) => {
+            if prefix > 32 {
+                return false;
+            }
+            prefix_match(&net.octets(), &ip.octets(), prefix)
+        }
+        (IpAddr::V6(net), IpAddr::V6(ip)) => {
+            if prefix > 128 {
+                return false;
+            }
+            prefix_match(&net.octets(), &ip.octets(), prefix)
+        }
+        // An IPv4 rule does not cover an IPv6 peer, or the reverse.
+        _ => false,
+    }
+}
+
+/// Compare the first `prefix` bits of two addresses.
+fn prefix_match(net: &[u8], ip: &[u8], prefix: u8) -> bool {
+    let whole = (prefix / 8) as usize;
+    let bits = prefix % 8;
+    if net[..whole] != ip[..whole] {
+        return false;
+    }
+    if bits == 0 {
+        return true;
+    }
+    let mask = 0xffu8 << (8 - bits);
+    net[whole] & mask == ip[whole] & mask
 }
 
 impl Default for Config {
@@ -202,6 +405,7 @@ impl Default for Config {
                 default_master_sae_id: default_master_sae_id(),
                 tls_verify: false,
             },
+            relay: RelayConfig::default(),
             security: SecurityConfig {
                 pq_algorithm: default_pq_algorithm(),
                 sig_algorithm: default_sig_algorithm(),
@@ -277,3 +481,281 @@ fn default_cache_enabled() -> bool {
 fn default_cache_ttl() -> u64 {
     300
 } // 5 minutes
+
+#[cfg(test)]
+mod allowlist_and_relay_tests {
+    use super::*;
+
+    /// A config written before the [relay] section existed must still parse,
+    /// with the relay off. If this breaks, every deployed gateway fails to
+    /// start on upgrade.
+    #[test]
+    fn a_config_without_a_relay_section_still_parses() {
+        let toml_src = r#"
+[proxy]
+listen = "127.0.0.1:8443"
+
+[qkd]
+vendor_api = "https://localhost:8080"
+default_slave_sae_id = "sae-b"
+default_master_sae_id = "sae-a"
+
+[security]
+pq_algorithm = "falcon512"
+sig_algorithm = "sphincsplus"
+authorized_keys = "/etc/pq-qkd-proxy/authorized_keys"
+proxy_private_key = "/etc/pq-qkd-proxy/proxy.key"
+proxy_certificate = "/etc/pq-qkd-proxy/proxy.crt"
+audit_log = "/var/log/pq-qkd-proxy/audit.log"
+
+[performance]
+"#;
+        let cfg: Config = toml::from_str(toml_src).expect("legacy config must parse");
+        assert!(!cfg.relay.is_enabled(), "the relay must default to OFF");
+    }
+
+    fn sock(s: &str) -> SocketAddr {
+        format!("{s}:9999").parse().unwrap()
+    }
+    fn v6(s: &str) -> SocketAddr {
+        format!("[{s}]:9999").parse().unwrap()
+    }
+
+    fn cfg_with_sources(sources: &[&str]) -> Config {
+        let mut c = Config::default();
+        c.proxy.allowed_sources = sources.iter().map(|s| s.to_string()).collect();
+        c
+    }
+
+    // ---- the bug this replaced -------------------------------------------
+
+    #[test]
+    fn a_configured_allowlist_actually_excludes() {
+        // Until 2026-09-08 this returned true unconditionally, so every
+        // operator who configured an allowlist had none. This is the
+        // regression test for that.
+        let c = cfg_with_sources(&["10.0.0.0/8"]);
+        assert!(c.is_allowed_source(&sock("10.1.2.3")));
+        assert!(
+            !c.is_allowed_source(&sock("192.168.1.1")),
+            "an address outside every rule must be refused"
+        );
+    }
+
+    #[test]
+    fn an_empty_allowlist_still_means_no_restriction() {
+        let c = cfg_with_sources(&[]);
+        assert!(c.is_allowed_source(&sock("203.0.113.7")));
+    }
+
+    // ---- matching --------------------------------------------------------
+
+    #[test]
+    fn a_bare_address_is_an_exact_match() {
+        let c = cfg_with_sources(&["51.79.26.123"]);
+        assert!(c.is_allowed_source(&sock("51.79.26.123")));
+        assert!(!c.is_allowed_source(&sock("51.79.26.124")));
+    }
+
+    #[test]
+    fn cidr_boundaries_are_respected_on_non_byte_prefixes() {
+        // /12 is the case a byte-wise comparison gets wrong.
+        let c = cfg_with_sources(&["172.16.0.0/12"]);
+        assert!(c.is_allowed_source(&sock("172.16.0.1")));
+        assert!(c.is_allowed_source(&sock("172.31.255.254")));
+        assert!(
+            !c.is_allowed_source(&sock("172.32.0.1")),
+            "172.32.0.1 is outside 172.16.0.0/12"
+        );
+        assert!(!c.is_allowed_source(&sock("172.15.255.255")));
+    }
+
+    #[test]
+    fn a_zero_prefix_matches_everything_in_its_family() {
+        let c = cfg_with_sources(&["0.0.0.0/0"]);
+        assert!(c.is_allowed_source(&sock("1.2.3.4")));
+        assert!(
+            !c.is_allowed_source(&v6("2001:db8::1")),
+            "an IPv4 rule must not cover an IPv6 peer"
+        );
+    }
+
+    #[test]
+    fn ipv6_is_matched_and_families_do_not_mix() {
+        let c = cfg_with_sources(&["2001:db8::/32"]);
+        assert!(c.is_allowed_source(&v6("2001:db8::1")));
+        assert!(c.is_allowed_source(&v6("2001:db8:ffff::9")));
+        assert!(!c.is_allowed_source(&v6("2001:db9::1")));
+        assert!(
+            !c.is_allowed_source(&sock("10.0.0.1")),
+            "an IPv6 rule must not cover an IPv4 peer"
+        );
+    }
+
+    #[test]
+    fn several_rules_are_a_union() {
+        let c = cfg_with_sources(&["10.0.0.0/8", "51.79.26.123", "2001:db8::/32"]);
+        assert!(c.is_allowed_source(&sock("10.9.9.9")));
+        assert!(c.is_allowed_source(&sock("51.79.26.123")));
+        assert!(c.is_allowed_source(&v6("2001:db8::5")));
+        assert!(!c.is_allowed_source(&sock("8.8.8.8")));
+    }
+
+    // ---- malformed entries must never widen access -----------------------
+
+    #[test]
+    fn a_malformed_entry_is_refused_rather_than_ignored() {
+        // The dangerous failure would be treating an unparseable rule as a
+        // wildcard. Each of these must match nothing.
+        for bad in [
+            "10.0.0.0/33",   // prefix too long for v4
+            "2001:db8::/129", // prefix too long for v6
+            "not-an-address",
+            "10.0.0.0/abc",
+            "",
+            "   ",
+        ] {
+            let c = cfg_with_sources(&[bad]);
+            assert!(
+                !c.is_allowed_source(&sock("10.0.0.1")),
+                "malformed entry {bad:?} must not admit anything"
+            );
+        }
+    }
+
+    #[test]
+    fn one_bad_rule_does_not_disable_the_good_ones() {
+        let c = cfg_with_sources(&["nonsense/99", "10.0.0.0/8"]);
+        assert!(c.is_allowed_source(&sock("10.0.0.1")));
+        assert!(!c.is_allowed_source(&sock("8.8.8.8")));
+    }
+
+    // ---- relay config ----------------------------------------------------
+
+    #[test]
+    fn relay_is_off_by_default_and_a_legacy_config_still_parses() {
+        let c = Config::default();
+        assert!(!c.relay.is_enabled());
+        assert!(c.relay.validate().is_ok());
+    }
+
+    #[test]
+    fn server_mode_requires_listen_and_backend() {
+        let mut r = RelayConfig {
+            standalone: false,
+            mode: "server".into(),
+            ..Default::default()
+        };
+        assert!(r.validate().is_err(), "no listen, no backend");
+        r.listen = Some(sock("127.0.0.1"));
+        assert!(r.validate().is_err(), "still no backend");
+        r.backend = Some(sock("127.0.0.1"));
+        assert!(r.validate().is_ok());
+    }
+
+    #[test]
+    fn client_mode_requires_listen_and_remote() {
+        let mut r = RelayConfig {
+            standalone: false,
+            mode: "client".into(),
+            pin: Some(test_pin()),
+            ..Default::default()
+        };
+        assert!(r.validate().is_err());
+        r.listen = Some(sock("127.0.0.1"));
+        assert!(r.validate().is_err(), "still no remote");
+        r.remote = Some(sock("127.0.0.1"));
+        assert!(r.validate().is_ok());
+    }
+
+    // ---- relay client pin (Verifpal F2) ----------------------------------
+
+    /// A syntactically valid fingerprint for config tests: the pin of a fresh
+    /// identity, in the exact form `--print-fingerprint` prints.
+    fn test_pin() -> String {
+        let id = crate::crypto::PqKeyExchange::new().expect("identity");
+        crate::crypto::format_fingerprint(&id.identity_fingerprint())
+    }
+
+    fn client_cfg() -> RelayConfig {
+        RelayConfig {
+            standalone: false,
+            mode: "client".into(),
+            listen: Some(sock("127.0.0.1")),
+            remote: Some(sock("127.0.0.1")),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_client_without_a_pin_is_refused_at_startup() {
+        // The unpinned client is the F2 configuration. It must not start by
+        // default, and the error must tell the operator what to do.
+        let err = client_cfg().validate().unwrap_err().to_string();
+        assert!(err.contains("relay.pin"), "got: {err}");
+        assert!(err.contains("print-fingerprint"), "got: {err}");
+    }
+
+    #[test]
+    fn a_client_with_a_pin_starts_and_requires_it() {
+        let mut r = client_cfg();
+        r.pin = Some(test_pin());
+        assert!(r.validate().is_ok());
+        assert!(matches!(
+            r.pin_policy().expect("policy"),
+            crate::relay::PinPolicy::Require(_)
+        ));
+    }
+
+    #[test]
+    fn a_malformed_pin_is_refused_at_startup() {
+        for bad in ["", "SHA3-256:", "SHA3-256:AAAA", "deadbeef"] {
+            let mut r = client_cfg();
+            r.pin = Some(bad.into());
+            let err = r.validate().unwrap_err().to_string();
+            assert!(err.contains("relay.pin"), "{bad:?}: got: {err}");
+        }
+    }
+
+    #[test]
+    fn allow_unpinned_is_an_explicit_opt_out() {
+        let mut r = client_cfg();
+        r.allow_unpinned = true;
+        assert!(r.validate().is_ok());
+        assert!(matches!(
+            r.pin_policy().expect("policy"),
+            crate::relay::PinPolicy::Unpinned
+        ));
+        // A pin, when present, wins over the opt-out.
+        r.pin = Some(test_pin());
+        assert!(matches!(
+            r.pin_policy().expect("policy"),
+            crate::relay::PinPolicy::Require(_)
+        ));
+    }
+
+    #[test]
+    fn an_unknown_relay_mode_is_refused_at_startup() {
+        let r = RelayConfig {
+            standalone: false,
+            mode: "proxy".into(),
+            ..Default::default()
+        };
+        let err = r.validate().unwrap_err().to_string();
+        assert!(err.contains("relay.mode"), "got: {err}");
+    }
+
+    #[test]
+    fn zero_max_connections_is_refused() {
+        // A relay that accepts nothing would bind and then refuse every peer.
+        let r = RelayConfig {
+            standalone: false,
+            mode: "server".into(),
+            listen: Some(sock("127.0.0.1")),
+            backend: Some(sock("127.0.0.1")),
+            max_connections: 0,
+            ..Default::default()
+        };
+        assert!(r.validate().is_err());
+    }
+}

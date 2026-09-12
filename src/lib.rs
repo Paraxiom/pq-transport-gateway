@@ -10,6 +10,7 @@ pub mod config;
 pub mod crypto;
 pub mod proxy;
 pub mod qkd_client;
+pub mod relay;
 
 pub use auth::Authenticator as AuthManager;
 pub use config::Config as ProxyConfig;

@@ -153,13 +153,22 @@ on audited Rust crates (`ml-kem`, `ml-dsa`, `slh-dsa`, `falcon-rs`).
   lookup (issue [#1](https://github.com/Paraxiom/pq-transport-gateway/issues/1)
   fix), but no challenge-response (clients are not asked to prove they
   hold the `dk` matching the `ek` they published). Adding this would
-  promote "Server→client only" to "Mutual" in §5. Server→client
-  pinning is now wired (issue
-  [#2](https://github.com/Paraxiom/pq-transport-gateway/issues/2)
-  partial fix: server-side enabler shipped via
-  `compute_identity_fingerprint` + `--print-fingerprint` CLI +
-  `docs/CLIENT-INTEGRATION.md`); the remaining piece is each client
-  implementation actually performing the pin check.
+  promote "Server→client only" to "Mutual" in §5. The Verifpal model
+  (`formal/VERIFICATION-RESULTS-2026-09-12.md`, finding F1) makes the
+  gap concrete: with the QKD leg absent or public, an attacker who
+  substitutes the client's `kem_ek` in the unauthenticated ClientHello
+  obtains the server's session key (the honest client halts on the
+  signature; in-session client signatures bound the damage). Tracked as
+  backlog B6. Server→client pinning: the server-side enabler
+  (`compute_identity_fingerprint` + `--print-fingerprint` +
+  `docs/CLIENT-INTEGRATION.md`) shipped under issue
+  [#2](https://github.com/Paraxiom/pq-transport-gateway/issues/2), and
+  as of 2026-09-12 the **relay client enforces it**: `relay.pin` is
+  required in client mode (`relay.allow_unpinned` is an explicit,
+  WARN-logged opt-out), the fingerprint is checked before the signature,
+  and a mismatch closes the connection (finding F2, backlog B7). The
+  remaining piece is external *gateway* clients performing §2 step 5 of
+  `CLIENT-INTEGRATION.md`; the gateway cannot do it for them.
 - **L3** No formal proof of forward secrecy (T3). Argued from ephemeral
   ML-KEM but not machine-checked.
 - **L4** No DoS mitigation beyond `max_connections` / `connection_timeout`.

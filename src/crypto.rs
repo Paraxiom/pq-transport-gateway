@@ -1071,7 +1071,10 @@ mod tests {
     fn v3_transcript_binds_key_mode() {
         let t1 = v3_transcript_with(0x01, "uuid-aaaa", "101", 32);
         let t2 = v3_transcript_with(0x00, "uuid-aaaa", "101", 32);
-        assert_ne!(t1, t2, "key_mode must be transcript-bound (no silent downgrade)");
+        assert_ne!(
+            t1, t2,
+            "key_mode must be transcript-bound (no silent downgrade)"
+        );
     }
 
     /// Master SAE-ID and key length are likewise bound.

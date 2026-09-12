@@ -78,7 +78,9 @@ pub fn admit_hello_v3(
              future-dated, or a replay"
         ));
     }
-    let mut guard = guard.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut guard = guard
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     match guard.check_and_insert(hello.client_random, now) {
         Verdict::Fresh => Ok(()),
         Verdict::Replay => Err(anyhow!(
@@ -747,8 +749,12 @@ impl ProxyServer {
         // `qkd.default_master_sae_id` config value as this gateway's label.
         let master_sae_id = self.config.qkd.default_master_sae_id.clone();
 
-        let handshake =
-            ServerHandshake::new().respond_v3(&client_hello, &self.host_key, qkd, &master_sae_id)?;
+        let handshake = ServerHandshake::new().respond_v3(
+            &client_hello,
+            &self.host_key,
+            qkd,
+            &master_sae_id,
+        )?;
         write_framed(stream, handshake.server_hello()).await?;
         info!(
             "v3 session with {}: key_mode={:?}",
@@ -951,10 +957,7 @@ mod tests {
 
     /// Client-side v3 transcript reconstruction from wire data — what a real
     /// external client computes from its own hello + the ServerHelloV3.
-    fn client_transcript_v3(
-        hello: &ClientHelloV3,
-        sh: &ServerHelloV3,
-    ) -> [u8; 32] {
+    fn client_transcript_v3(hello: &ClientHelloV3, sh: &ServerHelloV3) -> [u8; 32] {
         transcript_hash_v3(
             &hello.client_random,
             &sh.server_random,
@@ -1117,7 +1120,10 @@ mod tests {
         let client_kem = EphemeralKemKey::new().unwrap();
         let client_id = PqKeyExchange::new().unwrap();
         let mut hello = v3_hello(&client_kem, &client_id);
-        assert!(hello.verify_hello_sig().unwrap(), "an honest hello verifies");
+        assert!(
+            hello.verify_hello_sig().unwrap(),
+            "an honest hello verifies"
+        );
 
         let attacker_kem = EphemeralKemKey::new().unwrap();
         hello.kem_ek = attacker_kem.ek_bytes.clone();
@@ -1176,12 +1182,16 @@ mod tests {
         let honest = v3_hello(&client_kem, &client_id);
         assert!(honest.verify_hello_sig().unwrap());
 
-        let mutations: Vec<(&str, Box<dyn Fn(&mut ClientHelloV3)>)> = vec![
+        type Mutation = (&'static str, Box<dyn Fn(&mut ClientHelloV3)>);
+        let mutations: Vec<Mutation> = vec![
             ("client_random", Box::new(|h| h.client_random[0] ^= 1)),
             ("timestamp", Box::new(|h| h.timestamp += 1)),
             ("kem_ek", Box::new(|h| h.kem_ek[0] ^= 1)),
             ("slh_dsa_vk", Box::new(|h| h.slh_dsa_vk[0] ^= 1)),
-            ("requested_key_size", Box::new(|h| h.requested_key_size += 1)),
+            (
+                "requested_key_size",
+                Box::new(|h| h.requested_key_size += 1),
+            ),
             ("client_sae_id", Box::new(|h| h.client_sae_id.push('x'))),
             ("qkd_capable", Box::new(|h| h.qkd_capable = !h.qkd_capable)),
         ];
@@ -1220,7 +1230,10 @@ mod tests {
             t0 + Duration::from_secs(60),
         )
         .unwrap_err();
-        assert!(err.to_string().contains("replayed"), "still inside the window: {err}");
+        assert!(
+            err.to_string().contains("replayed"),
+            "still inside the window: {err}"
+        );
 
         // Beyond the window the guard has forgotten it; the timestamp check
         // is what keeps the recording worthless.
@@ -1247,7 +1260,10 @@ mod tests {
             let err = admit_hello_v3(&hello, server_clock, 120, &g, t0).unwrap_err();
             assert!(err.to_string().contains("timestamp"), "got: {err}");
         }
-        assert!(g.lock().unwrap().is_empty(), "a refused hello must not occupy a slot");
+        assert!(
+            g.lock().unwrap().is_empty(),
+            "a refused hello must not occupy a slot"
+        );
         // Exactly at the skew boundary is still acceptable.
         admit_hello_v3(&hello, hello.timestamp + 120, 120, &g, t0).expect("boundary");
     }
@@ -1261,7 +1277,10 @@ mod tests {
         let g = guard(16);
         let err = admit_hello_v3(&hello, hello.timestamp, 120, &g, Instant::now()).unwrap_err();
         assert!(err.to_string().contains("signature"), "got: {err}");
-        assert!(g.lock().unwrap().is_empty(), "unauthenticated hellos never reach the cache");
+        assert!(
+            g.lock().unwrap().is_empty(),
+            "unauthenticated hellos never reach the cache"
+        );
     }
 
     #[test]

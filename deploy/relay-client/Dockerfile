@@ -24,7 +24,11 @@ RUN cargo build --release --example relay_wan --locked \
     && strip target/release/examples/relay_wan
 
 FROM debian:bookworm-slim
-RUN useradd --system --uid 10001 --home /var/lib/pqtg --shell /usr/sbin/nologin pqtg \
+# uid/gid 65532 ("nonroot"), the conventional non-root identity used by the
+# pods this sidecar joins (runAsUser/fsGroup 65532), so a secret mounted with
+# fsGroup is readable without extra permissions.
+RUN groupadd --system --gid 65532 pqtg \
+    && useradd --system --uid 65532 --gid 65532 --home /var/lib/pqtg --shell /usr/sbin/nologin pqtg \
     && mkdir -p /var/lib/pqtg && chown pqtg:pqtg /var/lib/pqtg
 COPY --from=build /src/target/release/examples/relay_wan /usr/local/bin/relay_wan
 USER pqtg

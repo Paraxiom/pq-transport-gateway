@@ -1,0 +1,38 @@
+name: Relay image
+
+# Builds the PQTG relay client/server image (deploy/relay-client/Dockerfile)
+# for linux/amd64 and publishes it to GHCR. Manual trigger only: nothing is
+# published by a push.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag (e.g. relay-4, or a git tag)"
+        required: true
+        default: "relay-4"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/relay-client/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/paraxiom/pqtg-relay:${{ inputs.tag }}
+            ghcr.io/paraxiom/pqtg-relay:${{ github.sha }}

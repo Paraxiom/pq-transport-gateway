@@ -1,0 +1,70 @@
+# PQTG relay client as a sidecar (Kubernetes).
+#
+# Adds a post-quantum, mutually authenticated tunnel from a pod to a remote
+# TCP backend. The application keeps talking to 127.0.0.1:<LISTEN_PORT>; the
+# sidecar carries it to <RELAY_HOST>:<RELAY_PORT> inside the tunnel, and the
+# relay server on the far side forwards to the real backend.
+#
+# Placeholders to replace:
+#   IMAGE           the relay image (see Dockerfile in this directory)
+#   RELAY_HOST      the relay server, host or IP
+#   RELAY_PORT      the relay server port (default 9970)
+#   SERVER_PIN      the relay server's identity fingerprint, SHA3-256:<base64>,
+#                   obtained out of band from the operator of the relay server
+#   LISTEN_PORT     the local port the application already uses (e.g. 9944)
+#
+# Identity: generate ONCE, keep the private key in this cluster, and send only
+# the fingerprint to the relay server's operator for the allow-list:
+#
+#   docker run --rm -v "$PWD/identity:/var/lib/pqtg" IMAGE fingerprint relay_wan_client.key
+#   # prints SHA3-256:<base64>; identity/relay_wan_client.key is the private key
+#   kubectl -n <ns> create secret generic pqtg-relay-identity \
+#       --from-file=relay_wan_client.key=identity/relay_wan_client.key
+#
+# Then merge the sidecar container and the volume below into the pod spec of
+# the application (for Transparence: the trust-services Deployment), and point
+# the application at http://127.0.0.1:LISTEN_PORT (unchanged if it already
+# used a local tunnel on that port).
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: example-with-pqtg-relay
+spec:
+  template:
+    spec:
+      containers:
+        # ... the application container(s), unchanged ...
+        - name: pqtg-relay-client
+          image: IMAGE
+          args:
+            - client
+            - "127.0.0.1:LISTEN_PORT"
+            - "RELAY_HOST:RELAY_PORT"
+            - "--pin"
+            - "SERVER_PIN"
+          workingDir: /var/lib/pqtg
+          volumeMounts:
+            - name: pqtg-relay-identity
+              mountPath: /var/lib/pqtg
+              readOnly: true
+          resources:
+            requests: { cpu: 20m, memory: 32Mi }
+            limits: { cpu: 500m, memory: 128Mi }
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          # The client only listens on the pod's loopback; nothing else in the
+          # cluster can reach it, and only the allow-listed identity is accepted
+          # by the server on the far side.
+      volumes:
+        - name: pqtg-relay-identity
+          secret:
+            secretName: pqtg-relay-identity
+            defaultMode: 0400
+            items:
+              - key: relay_wan_client.key
+                path: relay_wan_client.key

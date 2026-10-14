@@ -3,7 +3,9 @@
 //! Built on `paraxiom-pqc` (pure-Rust post-quantum primitives). Uses:
 //! - ML-KEM-768 (FIPS 203) for the actual key encapsulation / shared-secret derivation
 //! - Falcon-512 (pending FIPS 206) for compact handshake signatures
-//! - SLH-DSA-Shake128f (FIPS 205) for hash-based stateless signatures (audit trail)
+//! - SLH-DSA-Shake128f (FIPS 205): a second identity key, allow-listed with the
+//!   Falcon key; it signs nothing today (an audit-trail signing path exists but
+//!   is not wired to the audit log)
 //! - AES-256-GCM for the symmetric session
 //! - SHA3-256 for transcript hashing and key mixing
 //!
@@ -140,10 +142,10 @@ impl PqKeyExchange {
         Ok(sig.bytes)
     }
 
-    /// Sign with the long-lived SLH-DSA key. Used for audit-log integrity
-    /// (issue #9 / threat-model T9). Currently called only by tests + the
-    /// audit subsystem; `#[allow(dead_code)]` because the bin's audit log
-    /// hasn't been wired through this path yet.
+    /// Sign with the long-lived SLH-DSA key. Meant for audit-log integrity
+    /// (issue #9, THREAT-MODEL S4/T9) but not wired: only tests and
+    /// `benches/audit.rs` call it, and the audit log is written unsigned.
+    /// `#[allow(dead_code)]` for that reason.
     #[allow(dead_code)]
     pub fn sign_hash_based(&self, msg: &[u8]) -> Result<Vec<u8>> {
         let sig = sign::sign(&self.hash_sk, msg).map_err(|e| anyhow!("SLH-DSA sign: {e:?}"))?;
@@ -162,9 +164,8 @@ impl PqKeyExchange {
         sign::verify(&vk, msg, &sig).map_err(|e| anyhow!("Falcon verify: {e:?}"))
     }
 
-    /// Verify an SLH-DSA signature. Used by audit-log readers (out-of-band
-    /// from the proxy itself). `#[allow(dead_code)]` because the bin
-    /// doesn't currently verify its own logs.
+    /// Verify an SLH-DSA signature, for a future audit-log reader. Nothing
+    /// outside tests and benches calls it, hence the `#[allow(dead_code)]`.
     #[allow(dead_code)]
     pub fn verify_slh_dsa(msg: &[u8], sig_bytes: &[u8], vk_bytes: &[u8]) -> Result<bool> {
         let vk = VerificationKey {

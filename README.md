@@ -20,10 +20,13 @@ undermines the quantum security that QKD is supposed to provide.
 PQTG sits directly on the QKD machine and:
 
 1. Listens only on a quantum-safe port for external clients
-2. Authenticates clients via Falcon-512 + SLH-DSA-Shake128f
+2. Admits only clients listed in `authorized_keys` (one Falcon-512 and one
+   SLH-DSA-Shake128f public key each); a protocol v3 client also proves it
+   holds the Falcon-512 key by signing its hello
 3. Establishes session keys via **ML-KEM-768** key encapsulation (FIPS 203)
 4. Translates inbound requests to the vendor's TLS API on `localhost`
-5. Optionally mixes a per-session QKD key into the PQC session key (hybrid)
+5. Optionally mixes a per-session QKD key into the PQC session key (hybrid,
+   protocol v3 only)
 
 External access is always post-quantum secure; the vendor's classical TLS
 is never exposed beyond the loopback interface.
@@ -37,7 +40,7 @@ below go through **[paraxiom-pqc](https://github.com/Paraxiom/paraxiom-pqc)** (p
 |------------------|----------------------------|----------------|
 | Key encapsulation| ML-KEM-768                 | FIPS 203       |
 | Handshake sig.   | Falcon-512                 | FIPS 206 (pending) |
-| Audit-trail sig. | SLH-DSA-Shake128f          | FIPS 205       |
+| Second client key| SLH-DSA-Shake128f (allow-list match only, signs nothing) | FIPS 205 |
 | AEAD             | AES-256-GCM                | NIST SP 800-38D |
 | Transcript / KDF | SHA3-256                   | FIPS 202       |
 
@@ -56,11 +59,13 @@ transcript  = SHA3("pqtg-transcript-v2" || cr || sr ||
                    len(ek) || ek || len(vk) || vk || len(ct) || ct)
 kem_ss      = ML-KEM-768.Decapsulate(client_dk, kem_ciphertext)        // client
             = ML-KEM-768.Encapsulate(client_ek)                        // server
-session_key = SHA3("pqtg-session-v2" || mix_keys(qkd_key, kem_ss) || transcript)
+session_key = SHA3("pqtg-session-v2" || kem_ss || transcript)
 ```
 
-If a QKD key is unavailable, `mix_keys` reduces to the PQC secret directly
-(PQC-only fallback).
+Protocol v2 is PQC-only: the gateway never mixes a QKD key into a v2 session,
+because v2 cannot carry the ETSI 014 `key_ID` a client would need to fetch the
+same key (`src/proxy.rs::handshake_v2`). QKD mixing (Hybrid mode) exists only
+in protocol v3.
 
 The v3 gateway protocol (`docs/PROTOCOL-V3-QKD-KEYID.md`: transcript-bound
 ETSI 014 `key_ID`, signed key-mode negotiation, client-signed hello) and the
@@ -116,13 +121,18 @@ falcon512+slh-dsa-shake128f <base64(falcon_vk(897) || slh_dsa_vk(32))> perm=read
 
 - **No external TLS**: vendor TLS stays on `127.0.0.1`
 - **PQ-only externally**: every external connection uses Falcon + ML-KEM
-- **Hybrid optional**: QKD key, when available, mixed into PQC session key
+- **Hybrid optional (v3 only)**: in protocol v3 a QKD key, when the client and the KME
+  support it, is mixed into the session key; v2 sessions are PQC-only
 - **Authenticated key agreement**: server signs the full handshake transcript
 - **Forward secrecy**: ephemeral ML-KEM keypair per handshake
-- **Audit logging**: every key request signed with SLH-DSA (hash-based, stateless)
-- **Standards status**: Falcon (FN-DSA, FIPS 206) is still a draft standard. PQTG pairs it
-  with SLH-DSA (FIPS 205, final) for client authentication, so authentication never rests
-  on a draft standard alone
+- **Audit logging**: connections, key requests, QKD key use and refused clients are
+  appended to a JSON-lines log. The entries are not signed: an SLH-DSA signing function
+  exists (`PqKeyExchange::sign_hash_based`) but is not wired to the log
+- **Standards status**: Falcon-512 (FN-DSA, FIPS 206) is still a draft standard, and it is
+  the only signature algorithm the protocol uses (server transcript, v3 client hello,
+  per-frame signatures). Clients also present an SLH-DSA-Shake128f (FIPS 205) key, but it
+  is only matched against `authorized_keys`; nothing is signed or verified with it, so
+  authentication rests on Falcon-512 alone
 
 ## Formal verification
 
@@ -131,7 +141,8 @@ Lean 4 parameter-conformance lemmas live under [`lean/`](lean/). They prove
 shape, NTT compatibility, primality of moduli) against the FIPS standards.
 They do *not* re-derive cryptographic security from lattice arithmetic;
 EUF-CMA / IND-CCA properties are inherited as assumptions from the
-respective standards and the audited `paraxiom-pqc` crate.
+respective standards and from the `paraxiom-pqc` crate, which has not been
+externally audited (see `SECURITY.md`).
 
 ```bash
 cd lean

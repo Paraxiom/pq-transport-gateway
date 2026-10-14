@@ -39,11 +39,12 @@ transcript  = SHA3-256("pqtg-transcript-v2"
 kem_ss      = ML-KEM-768.Decapsulate(client_dk, kem_ciphertext)        (client side)
             = (returned by ML-KEM-768.Encapsulate(client_ek))           (server side)
 
-session_key = SHA3-256("pqtg-session-v2" ‖ mix_keys(qkd, kem_ss) ‖ transcript)
+session_key = SHA3-256("pqtg-session-v2" ‖ kem_ss ‖ transcript)
 ```
 
-Where `mix_keys(qkd, kem_ss)` is the SHA3-256-based hybrid combiner if a
-QKD key is available; otherwise reduces to `kem_ss` alone.
+v2 is PQC-only: the gateway never mixes a QKD key into a v2 session, since
+v2 cannot tell the client which ETSI 014 key to fetch. Hybrid mode needs v3
+(`PROTOCOL-V3-QKD-KEYID.md`).
 
 ---
 

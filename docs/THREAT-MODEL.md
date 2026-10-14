@@ -44,15 +44,17 @@ Listed by what they cost us if violated.
 | A4| Authorized clients' Falcon-512 + SLH-DSA-Shake128f public keys are pre-distributed via a trusted out-of-band channel. | Attacker authorizes itself.        |
 | A5| ML-KEM-768 is IND-CCA secure (FIPS 203).                                            | KEM-derived session keys recoverable.           |
 | A6| Falcon-512 is EUF-CMA secure (Falcon submission, pending FIPS 206).                 | Forgeable handshake transcript signatures.      |
-| A7| SLH-DSA-Shake128f is EUF-CMA secure (FIPS 205).                                     | Forgeable audit-log signatures.                 |
+| A7| SLH-DSA-Shake128f is EUF-CMA secure (FIPS 205).                                     | None today: nothing is signed with SLH-DSA (S4).|
 | A8| AES-256-GCM is IND-CCA secure under nonce-respecting use (NIST SP 800-38D).         | Session traffic decryptable / forgeable.        |
 | A9| SHA3-256 is collision-resistant and behaves as a random oracle for KDF purposes.    | Transcript collisions / KDF weaknesses.         |
-|A10| The audited `paraxiom-pqc` crate correctly implements A5–A8.                        | All cryptographic guarantees collapse.          |
+|A10| The `paraxiom-pqc` crate (not externally audited) correctly implements A5–A8.       | All cryptographic guarantees collapse.          |
 
 A1 and A2 together define the **localhost trust boundary**.
 A5–A9 are inherited; PQTG does not re-derive them.
-A10 is a software-supply-chain assumption — `paraxiom-pqc` itself depends
-on audited Rust crates (`ml-kem`, `ml-dsa`, `slh-dsa`, `falcon-rs`).
+A10 is a software-supply-chain assumption. `paraxiom-pqc` has not been
+externally audited (`SECURITY.md`). It builds on the RustCrypto `ml-kem`,
+`ml-dsa` and `slh-dsa` crates and on `falcon-rs`; the three RustCrypto crates
+state in their READMEs that they have never been independently audited.
 
 ## 3. Scope
 
@@ -61,14 +63,19 @@ on audited Rust crates (`ml-kem`, `ml-dsa`, `slh-dsa`, `falcon-rs`).
 - **S1** Confidentiality of QKD-delivered key material between vendor KME
   and authorized PQTG clients across the public network.
 - **S2** Authentication of clients to PQTG via Falcon-512 + SLH-DSA-Shake128f
-  verification keys (`authorized_keys`). *Enforced as of issue
+  verification keys (`authorized_keys`). Both keys are matched against the
+  file; only the Falcon-512 key is ever used to verify a signature (the v3
+  hello signature and the per-frame signatures), never the SLH-DSA key.
+  *Enforced as of issue
   [#1](https://github.com/Paraxiom/pq-transport-gateway/issues/1) fix:
   unauthorized peers are rejected before any keypair generation,
   fail-closed on empty file. Covered by `auth::tests` (7 unit tests).*
 - **S3** Authentication of PQTG to clients via server-side Falcon-512
   signature over the full handshake transcript.
-- **S4** Integrity of the audit log via per-entry SLH-DSA-Shake128f
-  signature (hash-based, stateless).
+- **S4** Integrity of the audit log. *Status: not implemented. Entries are
+  unsigned JSON lines; an SLH-DSA-Shake128f signing path
+  (`PqKeyExchange::sign_hash_based`) exists but is not wired to the log
+  (T9).*
 - **S5** Forward secrecy of past sessions if the long-term Falcon signing
   key is compromised at a *future* time (achieved via per-handshake
   ephemeral ML-KEM keypair).
@@ -109,7 +116,7 @@ on audited Rust crates (`ml-kem`, `ml-dsa`, `slh-dsa`, `falcon-rs`).
 |T6 | **Algorithm downgrade** to weaker primitives.                                | Mitigated      | Algorithms are not negotiated. The gateway accepts exactly wire `2.1` and `3.2` (`proxy.rs::handshake_for_version`) and refuses every other version at the hello. ML-KEM-768, Falcon-512, SLH-DSA-Shake128f, AES-256-GCM are compile-time constants in `crypto.rs`. |
 |T7 | **Harvest-now-decrypt-later** quantum adversary.                             | Mitigated      | All cryptographic primitives are post-quantum (FIPS 203/204/205). No classical KEX (DH/ECDH) anywhere in the wire path. Loopback TLS to the vendor is *out* of scope per O6.                          |
 |T8 | **`authorized_keys` file tampering** by local privileged process.            | Mitigated by A1| File permissions enforced 0o600 by `--generate-keys`. Unauthorized rewrite implies A1 violation; not an additional defense layer.                                                                     |
-|T9 | **Audit log post-hoc tampering**.                                            | Detected       | Per-entry SLH-DSA-Shake128f signature (hash-based, stateless) over the line content. Tampering invalidates the signature; verification covered by `crypto.rs::tests::slh_dsa_audit_signature_roundtrip`. |
+|T9 | **Audit log post-hoc tampering**.                                            | **Not mitigated** (S4) | Entries are unsigned JSON lines appended to a file, so a process that can write the file can change them without a trace. An SLH-DSA-Shake128f signing path exists (`PqKeyExchange::sign_hash_based`, exercised by `crypto.rs::tests::slh_dsa_audit_signature_roundtrip`) but the audit log does not call it. Until it does, log integrity rests on host protection (A1). |
 |T10| **Nonce reuse, replay, reordering or reflection** of session frames.          | Mitigated since wire `2.1` / `3.2` | Before wire `2.1` / `3.2` this row said Mitigated and was wrong: one AES-256-GCM key (`session_key`) served both directions and both counters started at 0, so a client's first request and the gateway's first response were sealed under the same key and nonce (nonce reuse across directions), and the receiver accepted any nonce. Now the session key is expanded into one key per direction (`crypto.rs::derive_direction_keys`, `docs/KEY-SCHEDULE.md` §5); each direction counts its own nonces from 0 (4 zero bytes ‖ 8-byte big-endian counter, never wraps, exhaustion is an error on both sides); and the receiver accepts only the next expected nonce, so strict receive sequencing also refuses replayed, reordered and reflected frames (`PqSession::decrypt`). Older clients are refused at the hello. Tested in `crypto::tests` and end to end over TCP in `tests/gateway_session.rs`. |
 |T11| **DoS** via handshake flood from a single or small set of sources.           | **Pending mitigation** (S7) | `max_connections` + `connection_timeout` provide soft limits today. Issue [#7](https://github.com/Paraxiom/pq-transport-gateway/issues/7) tracks per-source rate limiting + cookie-PoW pre-handshake + inotify reload of `authorized_keys` for fast revocation. Botnet-class DDoS remains out-of-scope (O3). |
 |T12| **Side-channel leaks** in the host OS.                                       | Out of scope (O2)| `paraxiom-pqc` uses `zeroize` for secret material. Beyond that, host hardening is the deployer's responsibility.                                                                                    |
@@ -135,7 +142,7 @@ on audited Rust crates (`ml-kem`, `ml-dsa`, `slh-dsa`, `falcon-rs`).
 | Sign-and-encrypt round-trip preserves data + signer | **Proved by test**      | `crypto.rs::tests::sign_and_encrypt_roundtrip_with_real_kex`                                                                |
 | ETSI 014 v1.1.1 wire format conformance             | **Proved by test**      | `tests/etsi014_emulator.rs` — 9 integration tests against `httpmock` KME                                                    |
 | FIPS 203/204/205 parameter conformance              | **Proved by Lean**      | `lean/PQTGProofs/{MLKem,Falcon,Sphincs,Auth,Session,KeyMixing,ETSI014,Handshake}.lean` — 95 lemmas total, zero sorries        |
-| EUF-CMA / IND-CCA security of primitives            | **Assumed** (A5–A8)     | Not re-derived in Lean. Inherited from FIPS standards and audited `paraxiom-pqc` crate.                                     |
+| EUF-CMA / IND-CCA security of primitives            | **Assumed** (A5–A8)     | Not re-derived in Lean. Inherited from the FIPS standards and assumed of the `paraxiom-pqc` implementation (A10), which has not been externally audited. |
 | Forward secrecy under future Falcon SK compromise   | **Argued, not proved**  | Argument: ephemeral ML-KEM keypair per handshake; A5 implies past `kem_ss` is unreachable from any non-handshake key.       |
 | Mutual authentication                               | **Server→client only**  | Server signs transcript; clients are authorized by `authorized_keys` lookup but PQTG does not currently challenge the client to prove possession of `dk` for the published `ek`. |
 
@@ -188,9 +195,10 @@ The following are open invitations for working-group feedback:
 3. Is "Server→client only" handshake authentication sufficient given
    that clients are still authorized by vk, or should §6 L2 be elevated
    to a blocker before standardization-track adoption?
-4. The `mix_keys(qkd, kem_ss)` hybrid (PQC + QKD) is preserved when both
-   are available. Is that hybrid composition acceptable, or do reviewers
-   want pure QKD or pure PQC depending on deployment posture?
+4. In protocol v3 the hybrid (PQC + QKD, mixed through the keyed chain of
+   `docs/KEY-SCHEDULE.md` §4) is used when both are available; protocol v2
+   never mixes a QKD key. Is that hybrid composition acceptable, or do
+   reviewers want pure QKD or pure PQC depending on deployment posture?
 
 ---
 

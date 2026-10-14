@@ -51,7 +51,7 @@ We follow coordinated disclosure. Because PQTG addresses a known class of vulner
 
 - Written in Rust for memory safety
 - 99 Lean 4 theorems
-- NIST-standardized PQC: ML-KEM for key encapsulation, ML-DSA / SLH-DSA for signatures
+- Post-quantum algorithms: ML-KEM-768 (FIPS 203) for key encapsulation; Falcon-512 (FN-DSA, FIPS 206, still a draft) for every signature the protocol uses. Clients also present an SLH-DSA-Shake128f (FIPS 205) key, matched against `authorized_keys` and never used to sign or verify
 - Designed as a drop-in replacement for the classical TLS layer in ETSI GS QKD 014 deployments
 
 ## Known limitations

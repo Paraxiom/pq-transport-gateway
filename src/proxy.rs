@@ -6,8 +6,9 @@
 //!
 //! Both sides derive `transcript = SHA3(client_random ‖ server_random ‖ kem_ek
 //! ‖ server_falcon_vk ‖ kem_ciphertext)` and `session_key = SHA3("pqtg-session-v2"
-//! ‖ kem_ss ‖ transcript)`. If the optional QKD key is available, the PQC
-//! session key is mixed with it via `mix_keys`.
+//! ‖ kem_ss ‖ transcript)`. v2 never mixes a QKD key: `handshake_v2` takes the
+//! session with `into_session(None)`, since v2 cannot carry the `key_ID` a
+//! client would need. Hybrid mode is v3 only (`handshake_v3`).
 //!
 //! Session layer (wire `2.1` and `3.2`, both handshakes): the session key is
 //! expanded into one AES-256-GCM key per direction and each end accepts only
@@ -108,7 +109,9 @@ pub struct ClientHello {
     pub kem_ek: Vec<u8>,
     /// Falcon-512 verification key (client identity, used for inner-channel signatures).
     pub falcon_vk: Vec<u8>,
-    /// SLH-DSA-Shake128f verification key (audit-grade hash-based identity).
+    /// SLH-DSA-Shake128f verification key: a second identity key, matched
+    /// against `authorized_keys` together with `falcon_vk`. Nothing is signed
+    /// or verified with it.
     pub slh_dsa_vk: Vec<u8>,
     pub requested_key_size: usize,
 }

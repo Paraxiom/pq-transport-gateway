@@ -82,20 +82,20 @@ Error responses per spec §5.3 (`400` / `401` / `503` with structured
 
 ### 2.5 Audit trail
 
-Every control-plane operation (handshake, key forward, error) emits a
-JSON line signed with SLH-DSA-Shake128f. Logs are append-only and
-verifiable offline via a replay tool. Signature scheme is hash-based
-(stateless), so log tamper detection survives signing-key compromise.
+Control-plane events (connection, key request, QKD key use, refused
+client) are appended to a JSON-lines log. The entries are not signed: an
+SLH-DSA-Shake128f signing path exists (`PqKeyExchange::sign_hash_based`)
+but is not wired to the log, and no verification tool ships in this
+repository (`docs/THREAT-MODEL.md` S4, T9).
 
-### 2.6 Optional QKD-key-mix
+### 2.6 Optional QKD-key-mix (protocol v3 only)
 
-The `mix_keys(qkd_key, ml_kem_shared_secret)` code path combines a
-KMS-supplied QKD key with the ML-KEM secret to produce the session key.
-Result: information-theoretic security from QKD + post-quantum security
-from ML-KEM, in one channel.
-
-Enabled per-deployment via config. Default off in conformance testing
-(`[DEFAULT-1]` in `docs/kirq/TEST-PLAN.md`).
+In protocol v3 the key schedule mixes a KMS-supplied QKD key into the
+session key through a keyed chain (`docs/KEY-SCHEDULE.md` §4), when the
+client asks for it and the KME can supply it. The mode is negotiated per
+session and signed by the server (`key_mode`). Mixing through a PRF is
+computationally secure; it does not carry over the information-theoretic
+security of the QKD key. Protocol v2 never mixes a QKD key.
 
 ---
 
@@ -105,7 +105,7 @@ Enabled per-deployment via config. Default off in conformance testing
 |---------------------------|------------------------|--------------------|----------------|
 | Long-term identity sig    | Falcon-512             | FIPS 206 (pending) | paraxiom-pqc   |
 | Ephemeral KEM             | ML-KEM-768             | FIPS 203           | paraxiom-pqc   |
-| Audit-log sig             | SLH-DSA-Shake128f      | FIPS 205           | paraxiom-pqc   |
+| Second client key (allow-list only, signs nothing) | SLH-DSA-Shake128f | FIPS 205 | paraxiom-pqc |
 | Transcript hash           | SHA3-256               | FIPS 202           | sha3 crate     |
 | Session key derivation    | HKDF-SHA3-256          | RFC 5869           | hkdf crate     |
 | AEAD                      | AES-256-GCM            | NIST SP 800-38D    | aes-gcm crate  |

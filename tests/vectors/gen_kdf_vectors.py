@@ -3,8 +3,10 @@
 
 A second implementation of docs/KEY-SCHEDULE.md written from the document,
 not ported from src/kdf.rs. Uses only the standard library (hashlib SHA3-256
-and hmac). Rewrites kdf-domains.json, handshake-v3.json and relay-v4.json in
-this directory; `cargo test --test kdf_kat` checks the Rust code against them.
+and hmac). Rewrites kdf-domains.json, handshake-v3.json, relay-v4.json and
+gateway-session.json in this directory; `cargo test --test kdf_kat` checks the
+Rust code against them. handshake-v2.json is only read, as a cross-check of
+the v2 session key this script recomputes from the flat v2 rule.
 
 The byte-pattern inputs below are not valid keys or ciphertexts, they are only
 ever hashed. Nothing here is secret.
@@ -75,6 +77,10 @@ ALL = [
     ["gateway", "v3", "mix", "qkd"],
     ["gateway", "v3", "mix", "transcript"],
     ["gateway", "v3", "session-key"],
+    ["gateway", "v3", "key", "c2s"],
+    ["gateway", "v3", "key", "s2c"],
+    ["gateway", "v2", "key", "c2s"],
+    ["gateway", "v2", "key", "s2c"],
     ["relay", "v4", "hello"],
     ["relay", "v4", "transcript"],
     ["relay", "v4", "key", "c2s"],
@@ -135,6 +141,46 @@ c2s = PRF(kem_ss, D["relay/v4/key/c2s"], [rt])
 s2c = PRF(kem_ss, D["relay/v4/key/s2c"], [rt])
 r1 = PRF(c2s, D["relay/v4/ratchet"], [be32(1), b""])
 r2 = PRF(r1, D["relay/v4/ratchet"], [be32(2), kem_ss])
+
+# --- gateway session keys (wire 3.2 and 2.1) ---------------------------------
+# The handshake's session key is no longer an AES key: it is expanded into one
+# record key per direction, k_dir = HMAC(session_key, D[gateway/vN/key/dir]).
+#
+# The v2 session key comes from the flat v2 rule (unchanged since 2.0), with the
+# same inputs as handshake-v2.json, and is checked against that file.
+t_v2 = sha3(
+    b"pqtg-transcript-v2",
+    client_random,
+    server_random,
+    be32(len(kem_ek)),
+    kem_ek,
+    be32(len(falcon_pk)),
+    falcon_pk,
+    be32(len(kem_ct)),
+    kem_ct,
+)
+k_v2 = sha3(b"pqtg-session-v2", kem_ss, t_v2)
+with open(os.path.join(HERE, "handshake-v2.json")) as f:
+    v2_published = json.load(f)["expected"]
+assert t_v2.hex() == v2_published["transcript_hash"], "v2 transcript disagrees with handshake-v2.json"
+assert k_v2.hex() == v2_published["session_key_pqc_only"], "v2 session key disagrees with handshake-v2.json"
+
+
+def direction_keys(session_key, n):
+    return (
+        PRF(session_key, D["gateway/v%d/key/c2s" % n], []),
+        PRF(session_key, D["gateway/v%d/key/s2c" % n], []),
+    )
+
+
+v3_pqc_c2s, v3_pqc_s2c = direction_keys(k_pqc, 3)
+v3_hyb_c2s, v3_hyb_s2c = direction_keys(k_hyb, 3)
+v2_c2s, v2_s2c = direction_keys(k_v2, 2)
+assert len({v3_pqc_c2s, v3_pqc_s2c, v3_hyb_c2s, v3_hyb_s2c, v2_c2s, v2_s2c}) == 6
+
+
+def nonce(counter):
+    return be32(0) + be64(counter)
 
 
 def hx(b):
@@ -229,4 +275,32 @@ dump(
         },
     },
 )
-print("wrote kdf-domains.json, handshake-v3.json, relay-v4.json")
+dump(
+    "gateway-session.json",
+    {
+        "_about": ABOUT,
+        "inputs": {
+            "v3_session_key_pqc_only": hx(k_pqc),
+            "v3_session_key_hybrid": hx(k_hyb),
+            "v2_session_key": hx(k_v2),
+            "nonce_counters": [0, 1, 0x0102030405060708],
+        },
+        "expected": {
+            "v3_pqc_only_key_c2s": hx(v3_pqc_c2s),
+            "v3_pqc_only_key_s2c": hx(v3_pqc_s2c),
+            "v3_hybrid_key_c2s": hx(v3_hyb_c2s),
+            "v3_hybrid_key_s2c": hx(v3_hyb_s2c),
+            "v2_key_c2s": hx(v2_c2s),
+            "v2_key_s2c": hx(v2_s2c),
+            "nonces": [hx(nonce(0)), hx(nonce(1)), hx(nonce(0x0102030405060708))],
+        },
+        "rules": {
+            "direction_key": "k_dir = HMAC(session_key, D[gateway/vN/key/dir]), no further parts; N=3 for wire 3.2, N=2 for wire 2.1",
+            "roles": "the client seals with k_c2s and opens with k_s2c; the server seals with k_s2c and opens with k_c2s",
+            "nonce": "be32(0) || be64(counter), one counter per direction, each from 0",
+            "receive": "accept a frame only if its nonce is the next expected one, then advance",
+            "sources": "v3 session keys = handshake-v3.json session keys; v2 session key = handshake-v2.json session_key_pqc_only",
+        },
+    },
+)
+print("wrote kdf-domains.json, handshake-v3.json, relay-v4.json, gateway-session.json")

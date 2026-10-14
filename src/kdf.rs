@@ -2,9 +2,10 @@
 //!
 //! # Tree of labels (B2)
 //!
-//! Every hash and PRF use in the v3 gateway handshake and in the relay gets a
-//! 32-byte domain constant derived from a *path* in one tree, in the manner of
-//! Rosenpass's `hash_domain_ns!`:
+//! Every hash and PRF use in the v3 gateway handshake, in the gateway session
+//! layer (wire `3.2` and `2.1`) and in the relay gets a 32-byte domain constant
+//! derived from a *path* in one tree, in the manner of Rosenpass's
+//! `hash_domain_ns!`:
 //!
 //! ```text
 //! D(root)          = SHA3-256("PQTG-DOMAIN-TREE-v1")
@@ -14,9 +15,11 @@
 //! Two different paths cannot share a constant without a SHA3-256 collision,
 //! and every path in use is listed in [`ALL_DOMAINS`], which a test checks for
 //! distinctness and whose constants are published as known-answer vectors.
-//! The v2 gateway schedule (flat `pqtg-*-v2` labels) and the identity
+//! The v2 gateway handshake schedule (flat `pqtg-*-v2` labels) and the identity
 //! fingerprint (`pqtg-identity-fingerprint-v1`) are deliberately NOT moved:
-//! the KirQ Phase 1 client speaks v2, and pins must keep their values.
+//! the KirQ Phase 1 client speaks v2, and pins must keep their values. Only
+//! the step added on top of the v2 session key in wire `2.1`, its expansion
+//! into one record key per direction, uses the tree (`gateway/v2/key/*`).
 //!
 //! # Keyed schedule (B3)
 //!
@@ -68,6 +71,10 @@ pub const ALL_DOMAINS: &[&[&str]] = &[
     &["gateway", "v3", "mix", "qkd"],
     &["gateway", "v3", "mix", "transcript"],
     &["gateway", "v3", "session-key"],
+    &["gateway", "v3", "key", "c2s"],
+    &["gateway", "v3", "key", "s2c"],
+    &["gateway", "v2", "key", "c2s"],
+    &["gateway", "v2", "key", "s2c"],
     &["relay", "v4", "hello"],
     &["relay", "v4", "transcript"],
     &["relay", "v4", "key", "c2s"],
@@ -89,6 +96,10 @@ domains! {
     GATEWAY_V3_MIX_QKD        = ["gateway", "v3", "mix", "qkd"];
     GATEWAY_V3_MIX_TRANSCRIPT = ["gateway", "v3", "mix", "transcript"];
     GATEWAY_V3_SESSION_KEY    = ["gateway", "v3", "session-key"];
+    GATEWAY_V3_KEY_C2S        = ["gateway", "v3", "key", "c2s"];
+    GATEWAY_V3_KEY_S2C        = ["gateway", "v3", "key", "s2c"];
+    GATEWAY_V2_KEY_C2S        = ["gateway", "v2", "key", "c2s"];
+    GATEWAY_V2_KEY_S2C        = ["gateway", "v2", "key", "s2c"];
     RELAY_HELLO               = ["relay", "v4", "hello"];
     RELAY_TRANSCRIPT          = ["relay", "v4", "transcript"];
     RELAY_KEY_C2S             = ["relay", "v4", "key", "c2s"];

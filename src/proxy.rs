@@ -8,6 +8,12 @@
 //! ‖ server_falcon_vk ‖ kem_ciphertext)` and `session_key = SHA3("pqtg-session-v2"
 //! ‖ kem_ss ‖ transcript)`. If the optional QKD key is available, the PQC
 //! session key is mixed with it via `mix_keys`.
+//!
+//! Session layer (wire `2.1` and `3.2`, both handshakes): the session key is
+//! expanded into one AES-256-GCM key per direction and each end accepts only
+//! the next expected frame (`crypto::PqSession`, docs/KEY-SCHEDULE.md §5). The
+//! server accepts exactly these two versions and refuses older peers at the
+//! hello, since their session layer is not compatible.
 
 use crate::{
     audit,
@@ -15,8 +21,8 @@ use crate::{
     config::Config,
     crypto::{
         derive_session_key, derive_v3_session_key, encapsulate_to, mix_keys, random_bytes,
-        transcript_hash, transcript_hash_v3, PqKeyExchange, PqSession, FALCON_512_VK_LEN,
-        MIN_SESSION_FRAME_BYTES, ML_KEM_768_EK_LEN, SLH_DSA_SHAKE128F_VK_LEN,
+        transcript_hash, transcript_hash_v3, HandshakeVersion, PqKeyExchange, PqSession, Role,
+        FALCON_512_VK_LEN, MIN_SESSION_FRAME_BYTES, ML_KEM_768_EK_LEN, SLH_DSA_SHAKE128F_VK_LEN,
     },
     qkd_client::QkdClient,
     replay::{ReplayGuard, Verdict},
@@ -239,6 +245,23 @@ impl ClientHelloV3 {
     }
 }
 
+/// The handshake a hello's `version` selects. Exact match only: in this
+/// protocol a minor bump has always meant an incompatible key schedule or
+/// session layer (3.0, 3.1, 3.2; 2.0, 2.1), so a prefix match would let a peer
+/// complete a handshake whose session it cannot speak. An older peer is
+/// refused here, before authorization, encapsulation or any QKD allocation.
+fn handshake_for_version(version: &str) -> Result<HandshakeVersion> {
+    match version {
+        PROTOCOL_VERSION => Ok(HandshakeVersion::V2),
+        PROTOCOL_VERSION_V3 => Ok(HandshakeVersion::V3),
+        other => Err(anyhow!(
+            "Unsupported protocol version {other:?}: this gateway speaks {PROTOCOL_VERSION_V3} \
+             and {PROTOCOL_VERSION} only. Peers on 3.1, 3.0 or 2.0 seal with one session key \
+             in both directions and must upgrade (docs/KEY-SCHEDULE.md §5)"
+        )),
+    }
+}
+
 /// Minimal prefix decode to pick the struct shape before full deserialization.
 /// bincode is not self-describing, but it encodes the leading `version:
 /// String` first in both v2 and v3 hellos, so a peek at that one field is
@@ -270,11 +293,16 @@ pub struct KeyMetadata {
     pub qkd_enhanced: bool,
 }
 
-const PROTOCOL_VERSION: &str = "2.0";
-/// 3.1: the v3 hashes and key schedule moved to the domain tree and keyed
-/// chain in `crate::kdf` (backlog B2/B3). A 3.0 peer would derive different
-/// keys; no external 3.0 client exists.
-const PROTOCOL_VERSION_V3: &str = "3.1";
+/// 2.1: the v2 handshake is unchanged, but its session key is now expanded
+/// into one record key per direction with strict receive sequencing
+/// (`crypto::PqSession`). A 2.0 peer seals with the session key itself, in
+/// both directions, so it is refused at the hello.
+const PROTOCOL_VERSION: &str = "2.1";
+/// 3.2: the v3 handshake and key schedule of 3.1 are unchanged, and the
+/// session layer changes as for 2.1. History: 3.1 moved the v3 hashes and key
+/// schedule to the domain tree and keyed chain in `crate::kdf` (backlog
+/// B2/B3); 3.0 used flat labels. Neither is accepted.
+const PROTOCOL_VERSION_V3: &str = "3.2";
 const MAX_HELLO_BYTES: usize = 16 * 1024;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 /// Sanity cap on the client-supplied SAE-ID (ETSI 014 SAE_IDs are short
@@ -383,6 +411,8 @@ impl ServerHandshake<HelloAccepted> {
         let session_key = derive_session_key(&final_secret, &s.transcript);
         let session = PqSession::new(
             &session_key,
+            HandshakeVersion::V2,
+            Role::Server,
             random_bytes::<32>(),
             s.client_falcon_vk.clone(),
         )?;
@@ -501,6 +531,8 @@ impl ServerHandshake<HelloAcceptedV3> {
         );
         let session = PqSession::new(
             &session_key,
+            HandshakeVersion::V3,
+            Role::Server,
             random_bytes::<32>(),
             s.client_falcon_vk.clone(),
         )?;
@@ -594,12 +626,12 @@ impl ProxyServer {
         let hello_bytes = read_frame_bytes(stream, MAX_HELLO_BYTES).await?;
         let peek: VersionPeek = bincode::deserialize(&hello_bytes)
             .map_err(|_| anyhow!("Malformed hello: cannot read protocol version"))?;
-        if peek.version.starts_with("3.") {
-            self.handshake_v3(stream, peer_addr, &hello_bytes).await
-        } else if peek.version.starts_with("2.") {
-            self.handshake_v2(stream, peer_addr, &hello_bytes).await
-        } else {
-            Err(anyhow!("Unsupported protocol version: {}", peek.version))
+        let version = handshake_for_version(&peek.version).inspect_err(|e| {
+            warn!("Refused hello from {}: {}", peer_addr, e);
+        })?;
+        match version {
+            HandshakeVersion::V3 => self.handshake_v3(stream, peer_addr, &hello_bytes).await,
+            HandshakeVersion::V2 => self.handshake_v2(stream, peer_addr, &hello_bytes).await,
         }
     }
 
@@ -796,6 +828,9 @@ impl ProxyServer {
             let mut encrypted = vec![0u8; len];
             stream.read_exact(&mut encrypted).await?;
 
+            // Opens under the client-to-server key and only at the next
+            // expected counter: a replayed, reordered or reflected frame ends
+            // the connection here, before any key is requested.
             let request_bytes = session.decrypt_and_verify(&encrypted)?;
             let request: KeyRequest = bincode::deserialize(&request_bytes)?;
             audit::log_key_request(&peer_addr, &request.key_id, request.size);
@@ -917,21 +952,55 @@ mod tests {
         );
 
         // Client re-derives the session key (single-use ephemeral key) and
-        // decrypts a server-encrypted message — proving both sides agree.
+        // exchanges a request and a response with the server, which proves
+        // both sides agree on both direction keys.
         let client_ss = client_kem
             .decapsulate(&server_hello.kem_ciphertext)
             .unwrap();
         let client_session_key = derive_session_key(&client_ss, &transcript);
-        let client_session = PqSession::new(
+        let mut client_session = PqSession::new(
             &client_session_key,
+            HandshakeVersion::V2,
+            Role::Client,
             random_bytes::<32>(),
             server_hello.falcon_vk,
         )
         .unwrap();
+        request_response(
+            &mut client_session,
+            &mut server_session,
+            b"quantum-safe hello",
+        );
+    }
 
-        let (ct, nonce) = server_session.encrypt(b"quantum-safe hello").unwrap();
-        let pt = client_session.decrypt(&ct, &nonce).unwrap();
-        assert_eq!(pt, b"quantum-safe hello");
+    /// One request from the client end and one response from the server end,
+    /// each opened by the other: the session loop of `handle_session`, without
+    /// the socket.
+    fn request_response(client: &mut PqSession, server: &mut PqSession, msg: &[u8]) {
+        let (ct, nonce) = client.encrypt(msg).unwrap();
+        assert_eq!(server.decrypt(&ct, &nonce).unwrap(), msg);
+        let (ct, nonce) = server.encrypt(msg).unwrap();
+        assert_eq!(client.decrypt(&ct, &nonce).unwrap(), msg);
+    }
+
+    /// Exact version match. The two current versions select their handshake;
+    /// every older one is refused, including the ones whose prefix the server
+    /// used to accept.
+    #[test]
+    fn only_wire_2_1_and_3_2_are_accepted() {
+        assert_eq!(handshake_for_version("2.1").unwrap(), HandshakeVersion::V2);
+        assert_eq!(handshake_for_version("3.2").unwrap(), HandshakeVersion::V3);
+        for old in [
+            "2.0", "3.0", "3.1", "2.", "3.", "3.2.0", "4.0", "relay-4", "",
+        ] {
+            let err = handshake_for_version(old).unwrap_err();
+            assert!(
+                err.to_string().contains("Unsupported protocol version"),
+                "{old:?} must be refused, got: {err}"
+            );
+        }
+        assert_eq!(PROTOCOL_VERSION, "2.1");
+        assert_eq!(PROTOCOL_VERSION_V3, "3.2");
     }
 
     // ── v3 (PROTOCOL-V3-QKD-KEYID.md) ────────────────────────────────────────
@@ -1012,12 +1081,19 @@ mod tests {
         );
         let client_ss = client_kem.decapsulate(&sh.kem_ciphertext).unwrap();
         let client_key = derive_v3_session_key(&client_ss, Some(&qkd_bytes), &transcript);
-        let client_session =
-            PqSession::new(&client_key, random_bytes::<32>(), sh.falcon_vk.clone()).unwrap();
-
-        let (ct, nonce) = server_session.encrypt(b"hybrid interop at last").unwrap();
-        let pt = client_session.decrypt(&ct, &nonce).unwrap();
-        assert_eq!(pt, b"hybrid interop at last");
+        let mut client_session = PqSession::new(
+            &client_key,
+            HandshakeVersion::V3,
+            Role::Client,
+            random_bytes::<32>(),
+            sh.falcon_vk.clone(),
+        )
+        .unwrap();
+        request_response(
+            &mut client_session,
+            &mut server_session,
+            b"hybrid interop at last",
+        );
     }
 
     /// PqcOnly negotiation: no QKD → key_mode signed as PqcOnly, sessions agree.
@@ -1043,11 +1119,15 @@ mod tests {
         );
         let client_ss = client_kem.decapsulate(&sh.kem_ciphertext).unwrap();
         let client_key = derive_v3_session_key(&client_ss, None, &transcript);
-        let client_session =
-            PqSession::new(&client_key, random_bytes::<32>(), sh.falcon_vk.clone()).unwrap();
-
-        let (ct, nonce) = server_session.encrypt(b"pqc-only ok").unwrap();
-        assert_eq!(client_session.decrypt(&ct, &nonce).unwrap(), b"pqc-only ok");
+        let mut client_session = PqSession::new(
+            &client_key,
+            HandshakeVersion::V3,
+            Role::Client,
+            random_bytes::<32>(),
+            sh.falcon_vk.clone(),
+        )
+        .unwrap();
+        request_response(&mut client_session, &mut server_session, b"pqc-only ok");
     }
 
     /// Downgrade attack: a MITM flips Hybrid→PqcOnly in flight. The client's

@@ -152,17 +152,21 @@ lake build
 
 ## Status
 
-This is `2.0.0`. **`1.0.0` (Feb 2026, on crates.io) is yanked and must
-not be used** — it shipped a signature-only "shared secret" function that
-did not actually produce a shared secret (each side derived a different
-value). `2.0.0` replaces it with real ML-KEM-768 key encapsulation and
-re-grounds the handshake on `paraxiom-pqc`. The wire protocol bumped
-v1 → v2 and is not backwards compatible.
+This is `3.0.0`. **`2.0.0` must not be used**: its gateway session sealed
+both directions under one AES-GCM key with nonces counted from 0 on each
+side, so a request and the response at the same position shared a key and
+nonce (advisory of 2026-10-14 in `SECURITY.md`). `3.0.0` gives each
+direction its own key and accepts only the next expected frame, on wire
+`2.1` and `3.2`; it refuses `2.x` peers, so gateways and clients must be
+upgraded together. See `CHANGELOG.md`. **`1.0.0` is yanked**: its
+signature-only "shared secret" function did not produce a shared secret.
 
-Despite the `2.0.0` major number, this should still be considered
-**pre-stable**: open issues track production gaps including persistence
-ergonomics, mutual auth, and DoS hardening. Pin exactly (`= "2.0.0"`)
-until those land if you depend on this for anything load-bearing.
+Despite the major number, this should still be considered **pre-stable**:
+the major version counts wire breaks, not maturity. Open issues track
+production gaps including mutual auth and DoS hardening, and known limits
+are listed in `docs/THREAT-MODEL.md` (§6). It has not been externally
+audited. Pin exactly (`= "3.0.0"`) if you depend on this for anything
+load-bearing.
 
 ## Open-core boundary
 

@@ -204,7 +204,9 @@ Semantic versioning. Wire-format compatibility:
 - **Minor bump** for backward-compatible feature additions.
 - **Patch bump** for bug fixes and non-protocol-breaking improvements.
 
-Current version: `2.0.0` (released, see `Cargo.toml`).
+Current version: `3.0.0` (see `Cargo.toml` and `CHANGELOG.md`). It broke 2.0.0
+at the wire (gateway `2.1` / `3.2`) to fix nonce reuse in the gateway session;
+2.0.0 is to be yanked.
 
 ---
 

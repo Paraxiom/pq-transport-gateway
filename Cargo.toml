@@ -1,9 +1,9 @@
 [package]
 name = "pq-transport-gateway"
-version = "2.0.0"
+version = "3.0.0"
 edition = "2021"
 authors = ["Paraxiom Technologies Inc. <security@paraxiom.org>"]
-description = "Post-Quantum secure proxy for QKD infrastructure (ETSI 014). Wire-incompatible with the broken 1.0.0; do not use 1.0.0."
+description = "Post-quantum secure proxy for QKD infrastructure (ETSI 014). 3.0.0 fixes AES-GCM nonce reuse in 2.0.0 and is wire-incompatible with 2.x; do not use 2.0.0 or 1.0.0."
 license = "GPL-3.0-only"
 keywords = ["quantum", "cryptography", "post-quantum", "qkd", "proxy"]
 categories = ["cryptography", "network-programming"]

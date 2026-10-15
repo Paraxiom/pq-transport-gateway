@@ -33,6 +33,17 @@ We follow coordinated disclosure. Because PQTG addresses a known class of vulner
 5. We release the fix and publish an advisory
 6. We publicly disclose after users have had reasonable time to update
 
+## Supported versions
+
+| Version | Supported | Notes |
+|---|---|---|
+| 3.0.x | Yes | Gateway wire `2.1` / `3.2`, relay `relay-4`. Uses `paraxiom-pqc` 0.2. |
+| 2.0.0 | **No** | Affected by the gateway session nonce reuse (advisory of 2026-10-14 below). To be yanked from crates.io after 3.0.0 is published. Not wire-compatible with 3.0.0. |
+| 1.0.0 | **No** | Yanked. Its handshake did not produce a shared secret. |
+
+Commits on `main` from the initial public release (e3bf242) through e50204d
+are affected by the same nonce reuse as 2.0.0.
+
 ## Scope
 
 ### In scope
@@ -56,7 +67,7 @@ We follow coordinated disclosure. Because PQTG addresses a known class of vulner
 
 ## Known limitations
 
-- Pre-1.0 software — use with appropriate caution for production QKD links
+- Early-stage software despite the 3.x version number: the major version counts wire breaks, not maturity. Use with appropriate caution for production QKD links
 - Not yet externally audited
 - Assumes trusted QKD hardware upstream; PQTG secures the control channel, not the quantum channel itself
 
@@ -93,7 +104,7 @@ never wraps; each end accepts only the next expected nonce, which also refuses
 replayed, reordered and reflected frames. The handshakes and their key
 schedules are unchanged. Specified in `docs/KEY-SCHEDULE.md` §5, pinned by
 `tests/vectors/gateway-session.json`, tested in `src/crypto.rs` and end to end
-in `tests/gateway_session.rs`.
+in `tests/gateway_session.rs`. First release with the fix: 3.0.0.
 
 **Action.** Upgrade the gateway and every client together. A fixed gateway
 refuses `2.0`, `3.0` and `3.1` hellos, and a client that follows the updated

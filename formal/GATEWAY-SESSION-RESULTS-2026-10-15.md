@@ -113,6 +113,7 @@ All runs had 0 failures. "Frames sealed" includes the two frames per case that t
 - **Starting corpus.** The corpus from the interrupted 2026-10-14 runs, plus the committed seeds.
 - **Library version.** Before the runs, `fuzz/Cargo.lock` (not committed, it is gitignored) was pinned by hand to the gateway's own `paraxiom-pqc` rev, c0ee1f7 (0.1.3). Left alone, it had resolved 0.1.4, because `Cargo.toml` named the git repository with no rev. Since the follow-up commit, `Cargo.toml` and `kani/Cargo.toml` pin `rev = "c0ee1f7…"`, and `fuzz/` inherits it through the path dependency: a fuzz build from a fresh lock (old lock moved aside) resolved paraxiom-pqc 0.1.3 at c0ee1f7.
 - **Concurrency.** Kani was running on other cores at the same time, so execution rates are lower bounds.
+- **Later the same day (3.0.0).** The gateway moved to `paraxiom-pqc` 0.2.0 from crates.io. The fuzz and Kani results in this document were obtained with 0.1.3 and were not repeated on 0.2.0; the fuzz targets were only rebuilt against it, and the Kani crate only type-checked (`cargo check`).
 
 Each target asserts properties, not just "no panic". The full list is in each file's header.
 

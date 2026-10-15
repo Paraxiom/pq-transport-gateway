@@ -19,10 +19,11 @@ path = "src/lib.rs"
 [dependencies]
 # Post-quantum cryptography — Paraxiom unified API (pure-Rust PQC primitives)
 # Provides ML-KEM (FIPS 203), ML-DSA (FIPS 204), SLH-DSA (FIPS 205), Falcon
-# Pinned to the commit of paraxiom-pqc 0.1.3 so every build (including fuzz/,
-# which inherits it through the path dependency) uses the same library.
-# A git dependency cannot be published; see docs/THREAT-MODEL.md (A10).
-paraxiom-pqc = { git = "https://github.com/Paraxiom/paraxiom-pqc.git", rev = "c0ee1f7e1aa262e8671f1924c48b73fb50962cc5" }
+# From crates.io. 0.2.0 clears secret keys and shared secrets on drop and
+# checks the Falcon degree against the key's label; fuzz/ inherits it through
+# the path dependency and kani/ names the same version. See
+# docs/THREAT-MODEL.md (A10).
+paraxiom-pqc = "0.2"
 
 # Transitive versions are resolved from the vendored ml-dsa/slh-dsa forks.
 

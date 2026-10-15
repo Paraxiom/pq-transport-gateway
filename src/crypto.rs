@@ -1618,4 +1618,49 @@ mod tests {
         assert!(ok.is_ok());
         assert_eq!(ok.unwrap().role(), Role::Client);
     }
+
+    /// `paraxiom-pqc` 0.2.0 checks that a Falcon key's header and length match
+    /// the degree its label names, and refuses to sign or verify otherwise.
+    /// The gateway labels every Falcon key `Falcon512`, so the keys it
+    /// generates must carry the Falcon-512 headers (public 0x09, secret 0x59).
+    #[test]
+    fn generated_falcon_keys_carry_the_falcon_512_header() {
+        let id = PqKeyExchange::new().unwrap();
+        let vk = id.falcon_pk_bytes();
+        assert_eq!(vk.len(), FALCON_512_VK_LEN);
+        assert_eq!(vk[0], 0x09, "Falcon-512 public key header");
+        assert_eq!(id.sig_sk.bytes.len(), 1281);
+        assert_eq!(id.sig_sk.bytes[0], 0x59, "Falcon-512 secret key header");
+
+        let restored = PqKeyExchange::decode(&id.encode().unwrap()).unwrap();
+        assert_eq!(restored.sig_sk.algorithm, SignAlgorithm::Falcon512);
+        assert_eq!(restored.sig_sk.bytes[0], 0x59);
+    }
+
+    /// A key of another degree, given where the gateway expects Falcon-512,
+    /// never verifies. Before `paraxiom-pqc` 0.2.0, a Falcon-1024 key and
+    /// signature passed under the Falcon-512 label were accepted.
+    #[test]
+    fn verify_falcon_refuses_keys_of_another_degree() {
+        let msg = b"degree check";
+        let id = PqKeyExchange::new().unwrap();
+        let sig = id.sign_transcript(msg).unwrap();
+        assert!(PqKeyExchange::verify_falcon(msg, &sig, id.falcon_pk_bytes()).unwrap());
+
+        // Right length, Falcon-1024 header byte.
+        let mut relabelled = id.falcon_pk_bytes().to_vec();
+        relabelled[0] = 0x0A;
+        assert!(!matches!(
+            PqKeyExchange::verify_falcon(msg, &sig, &relabelled),
+            Ok(true)
+        ));
+
+        // A real Falcon-1024 key and signature.
+        let kp = sign::keypair(SignAlgorithm::Falcon1024).unwrap();
+        let sig_1024 = sign::sign(&kp.sk, msg).unwrap();
+        assert!(!matches!(
+            PqKeyExchange::verify_falcon(msg, &sig_1024.bytes, &kp.vk.bytes),
+            Ok(true)
+        ));
+    }
 }

@@ -58,9 +58,13 @@ Classical TLS is **never** exposed on eth0. Verified by tcpdump per
 1. Client → PQTG: `ClientHello` with ML-KEM-768 public key, client_random
 2. PQTG → Client: `ServerHello` with Falcon-512 signature over
    `(transcript_hash, server_random)`, ML-KEM-768 ciphertext
-3. Both sides: HKDF-SHA3-256 derives session keys from
-   `(ml_kem_shared_secret, transcript_hash)`
-4. AEAD: AES-256-GCM session keys protect subsequent ETSI 014 calls
+3. Both sides derive a 32-byte session key from
+   `(ml_kem_shared_secret, transcript_hash)`: SHA3-256 over flat labels
+   in v2 (`derive_session_key`), an HMAC-SHA3-256 keyed chain in v3
+   (`docs/KEY-SCHEDULE.md` §4). No HKDF is used.
+4. The session key is expanded by an HMAC-SHA3-256 PRF into one
+   AES-256-GCM key per direction, `k_c2s` and `k_s2c`
+   (`docs/KEY-SCHEDULE.md` §5); these protect subsequent ETSI 014 calls
 
 Mutual authentication: client-side Falcon identity verified against
 `authorized_keys` file before any ETSI 014 forwarding.
@@ -107,7 +111,7 @@ security of the QKD key. Protocol v2 never mixes a QKD key.
 | Ephemeral KEM             | ML-KEM-768             | FIPS 203           | paraxiom-pqc   |
 | Second client key (allow-list only, signs nothing) | SLH-DSA-Shake128f | FIPS 205 | paraxiom-pqc |
 | Transcript hash           | SHA3-256               | FIPS 202           | sha3 crate     |
-| Session key derivation    | HKDF-SHA3-256          | RFC 5869           | hkdf crate     |
+| Session key derivation    | SHA3-256 over labels (v2); HMAC-SHA3-256 keyed chain (v3); HMAC-SHA3-256 PRF for the per-direction keys | FIPS 202, RFC 2104 | sha3 + hmac crates; `docs/KEY-SCHEDULE.md` |
 | AEAD                      | AES-256-GCM            | NIST SP 800-38D    | aes-gcm crate  |
 
 Falcon-512 signature size: 666 bytes typical.

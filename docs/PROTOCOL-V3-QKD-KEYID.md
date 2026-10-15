@@ -1,6 +1,6 @@
 # PQTG Wire Protocol v3 — QKD key-id distribution (design sketch)
 
-Status: **IMPLEMENTED** (2026-08-18, branch feat/protocol-v3-keyid; audited against eprint 2025/1671 — see audit-vs-eprint-2025-1671.md). Originally authored from the
+Status: **IMPLEMENTED** (2026-08-18, branch feat/protocol-v3-keyid; checked internally against the eprint 2025/1671 model — see audit-vs-eprint-2025-1671.md). Originally authored from the
 KirQ Site-101 deployment, 2026-06-03.
 Supersedes the QKD-mixing portion of `docs/CLIENT-INTEGRATION.md` (v2).
 

@@ -1,8 +1,9 @@
 // Wraps the gateway's src/crypto.rs, unmodified, in `pub mod crypto { ... }`
 // and appends the proofs as a child module, so they can read the session's
 // private counters exactly as the in-file unit tests do. Nothing is edited:
-// the bytes of src/crypto.rs are copied as they are, and the build fails if
-// the copy ever differs from the file.
+// the text of src/crypto.rs is read at build time and inserted as it is, so
+// the harnesses always see the current file. There is no separate check that
+// compares the copy with the file; the insertion itself does not alter it.
 
 use std::env;
 use std::fs;
@@ -21,8 +22,6 @@ fn main() {
         "pub mod crypto {{\n{source}\n#[cfg(kani)]\nmod session_proofs {{\ninclude!({:?});\n}}\n}}\n",
         proofs.display().to_string()
     );
-    // The copy must contain the file byte for byte.
-    assert!(wrapped.contains(&source));
 
     let out = PathBuf::from(env::var("OUT_DIR").expect("out dir")).join("crypto_under_proof.rs");
     fs::write(out, wrapped).expect("write wrapped crypto.rs");

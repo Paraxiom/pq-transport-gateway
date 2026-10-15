@@ -396,14 +396,14 @@ impl ServerHandshake<HelloAccepted> {
     ///
     /// The handshake cannot be touched after the session is taken:
     ///
-    /// ```compile_fail
-    /// use pq_transport_gateway::proxy::ServerHandshake;
-    /// use pq_transport_gateway::{ClientHello, PqKeyExchange};
-    /// let host = PqKeyExchange::new().unwrap();
-    /// let hello: ClientHello = unimplemented!();
-    /// let hs = ServerHandshake::new().respond(&hello, &host).unwrap();
-    /// let _session = hs.into_session(None);  // consumes the handshake
-    /// let _ = hs.server_hello();             // error[E0382]: use of moved value
+    /// ```compile_fail,E0382
+    /// use pq_qkd_proxy::proxy::ServerHandshake;
+    /// use pq_qkd_proxy::{ClientHello, PqKeyExchange};
+    /// fn handshake(hello: &ClientHello, host: &PqKeyExchange) {
+    ///     let hs = ServerHandshake::new().respond(hello, host).unwrap();
+    ///     let _session = hs.into_session(None); // consumes the handshake
+    ///     let _ = hs.server_hello(); // error[E0382]: borrow of moved value
+    /// }
     /// ```
     pub fn into_session(self, qkd_material: Option<&[u8]>) -> Result<(PqSession, Vec<u8>)> {
         let s = self.state;

@@ -55,6 +55,12 @@ A10 is a software-supply-chain assumption. `paraxiom-pqc` has not been
 externally audited (`SECURITY.md`). It builds on the RustCrypto `ml-kem`,
 `ml-dsa` and `slh-dsa` crates and on `falcon-rs`; the three RustCrypto crates
 state in their READMEs that they have never been independently audited.
+PQTG takes `paraxiom-pqc` as a git dependency pinned to commit c0ee1f7
+(version 0.1.3) in `Cargo.toml`. Until 2026-10-15 the manifest named the
+repository with no rev, so only the root `Cargo.lock` fixed the version, and
+the separately locked `fuzz/` crate could resolve a newer one. A git
+dependency cannot be published to crates.io; a release needs a registry
+version of `paraxiom-pqc`.
 
 ## 3. Scope
 
@@ -119,7 +125,7 @@ state in their READMEs that they have never been independently audited.
 |T9 | **Audit log post-hoc tampering**.                                            | **Not mitigated** (S4) | Entries are unsigned JSON lines appended to a file, so a process that can write the file can change them without a trace. An SLH-DSA-Shake128f signing path exists (`PqKeyExchange::sign_hash_based`, exercised by `crypto.rs::tests::slh_dsa_audit_signature_roundtrip`) but the audit log does not call it. Until it does, log integrity rests on host protection (A1). |
 |T10| **Nonce reuse, replay, reordering or reflection** of session frames.          | Mitigated since wire `2.1` / `3.2` | Before wire `2.1` / `3.2` this row said Mitigated and was wrong: one AES-256-GCM key (`session_key`) served both directions and both counters started at 0, so a client's first request and the gateway's first response were sealed under the same key and nonce (nonce reuse across directions), and the receiver accepted any nonce. Now the session key is expanded into one key per direction (`crypto.rs::derive_direction_keys`, `docs/KEY-SCHEDULE.md` §5); each direction counts its own nonces from 0 (4 zero bytes ‖ 8-byte big-endian counter, never wraps, exhaustion is an error on both sides); and the receiver accepts only the next expected nonce, so strict receive sequencing also refuses replayed, reordered and reflected frames (`PqSession::decrypt`). Older clients are refused at the hello. Tested in `crypto::tests` and end to end over TCP in `tests/gateway_session.rs`. |
 |T11| **DoS** via handshake flood from a single or small set of sources.           | **Pending mitigation** (S7) | `max_connections` + `connection_timeout` provide soft limits today. Issue [#7](https://github.com/Paraxiom/pq-transport-gateway/issues/7) tracks per-source rate limiting + cookie-PoW pre-handshake + inotify reload of `authorized_keys` for fast revocation. Botnet-class DDoS remains out-of-scope (O3). |
-|T12| **Side-channel leaks** in the host OS.                                       | Out of scope (O2)| `paraxiom-pqc` uses `zeroize` for secret material. Beyond that, host hardening is the deployer's responsibility.                                                                                    |
+|T12| **Side-channel leaks** in the host OS.                                       | Out of scope (O2)| Memory hygiene is partial. The pinned `paraxiom-pqc` 0.1.3 does not zeroize its key types (ML-KEM decapsulation keys, Falcon and SLH-DSA signing keys, shared secrets). In PQTG, these are wiped on drop: the per-direction record keys (`crypto::DirectionKeys`), the v3 key-schedule chain (`kdf::Chain`), the relay's epoch keys and ratchet KEM secrets, and the ETSI 014 key material (`Zeroizing`). These are not: the 32-byte handshake `session_key`, the expanded AES key schedules inside `Aes256Gcm` (`aes-gcm` is built without its `zeroize` feature), and the long-term identity keys in `PqKeyExchange`, which are also stored unencrypted on disk (file mode 0o600). Zeroization of the library's secret types arrives with `paraxiom-pqc` 0.2.0, which this crate does not use yet. Beyond that, host hardening is the deployer's responsibility. |
 |T13| **Vendor KME compromise** (key generation issues, forged TLS).               | Out of scope (O6)| PQTG cannot distinguish a compromised KME from a working one; it ships whatever the KME delivers.                                                                                                  |
 
 ### Status legend

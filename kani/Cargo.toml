@@ -19,7 +19,7 @@ aes-gcm = { package = "pqtg-aead-model", path = "aead-model" }
 anyhow = "1.0"
 base64 = "0.21"
 hmac = "0.12"
-paraxiom-pqc = { git = "https://github.com/Paraxiom/paraxiom-pqc.git" }
+paraxiom-pqc = { git = "https://github.com/Paraxiom/paraxiom-pqc.git", rev = "c0ee1f7e1aa262e8671f1924c48b73fb50962cc5" }
 rand = "0.8"
 sha3 = "0.10"
 zeroize = { version = "1.7", features = ["derive"] }

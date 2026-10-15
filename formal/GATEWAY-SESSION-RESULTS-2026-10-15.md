@@ -111,7 +111,7 @@ All runs had 0 failures. "Frames sealed" includes the two frames per case that t
 **Setup.**
 - **Toolchain.** `cargo +nightly fuzz run -O <target> fuzz/corpus/<target> fuzz/seeds/<target> -- -max_total_time=240 -print_final_stats=1`, with `-max_len` and `-malloc_limit_mb` as given in each target's header.
 - **Starting corpus.** The corpus from the interrupted 2026-10-14 runs, plus the committed seeds.
-- **Library version.** Before the runs, `fuzz/Cargo.lock` (not committed, it is gitignored) was pinned to the gateway's own `paraxiom-pqc` rev, c0ee1f7 (0.1.3). Left alone, it had resolved 0.1.4.
+- **Library version.** Before the runs, `fuzz/Cargo.lock` (not committed, it is gitignored) was pinned by hand to the gateway's own `paraxiom-pqc` rev, c0ee1f7 (0.1.3). Left alone, it had resolved 0.1.4, because `Cargo.toml` named the git repository with no rev. Since the follow-up commit, `Cargo.toml` and `kani/Cargo.toml` pin `rev = "c0ee1f7…"`, and `fuzz/` inherits it through the path dependency: a fuzz build from a fresh lock (old lock moved aside) resolved paraxiom-pqc 0.1.3 at c0ee1f7.
 - **Concurrency.** Kani was running on other cores at the same time, so execution rates are lower bounds.
 
 Each target asserts properties, not just "no panic". The full list is in each file's header.
@@ -153,7 +153,7 @@ A second run on `decrypt_and_verify`, with `--test session_payload` added: 19 di
 ## 6. Kani harnesses: `kani/` (experimental, mostly no verdict)
 
 **What the harnesses are.**
-- **Code under check.** `src/crypto.rs` and `src/kdf.rs` are compiled verbatim (`kani/build.rs` asserts that the copy is byte-identical).
+- **Code under check.** `src/crypto.rs` and `src/kdf.rs` are compiled verbatim (`kani/build.rs` reads `src/crypto.rs` at build time and inserts its text unchanged into a wrapping module; an earlier version of this line said build.rs asserts the copy is byte-identical, but that assertion was always true and has been removed).
 - **Cipher.** AES-256-GCM is replaced by an oracle model (`kani/aead-model/`). It records the key and nonce of each call and lets the harness choose success or failure, and nothing is encrypted.
 - **PRF.** In the role-mapping harness, HMAC-SHA3-256 is replaced by a key-XOR-domain stub.
 - **Falcon.** In the full-frame harness, Falcon verification is replaced by an arbitrary outcome.
@@ -183,7 +183,15 @@ Neither was done. The previous session's bisection probes were removed.
 
 ## 7. Full test suite
 
-Final run (`cargo +stable test`, debug, 2026-10-15), with `cargo fmt --all -- --check` clean. `cargo clippy --all-targets -- -D warnings` fails on clippy 1.96 with 9 `uninlined_format_args` lints. They are in `src/audit.rs`, `auth.rs`, `crypto.rs` (persistence code), `proxy.rs` and `qkd_client.rs`, all from commit e3bf2427 and untouched by this branch; the lint is new in that clippy. With that one lint allowed, clippy is clean.
+Final run (`cargo test --no-fail-fast`, debug, default toolchain nightly 1.90, 2026-10-15), with `cargo fmt --all -- --check` clean.
+
+`cargo clippy --all-targets -- -D warnings` depends on the clippy version:
+- clippy 1.88.0 (the local `stable` alias): exit 101, 9 `uninlined_format_args` lints, all in code this branch did not change (`src/audit.rs`, `auth.rs`, `crypto.rs` persistence code, `proxy.rs`, `qkd_client.rs`; from commit e3bf2427). That lint was in clippy's default set on 1.88.
+- clippy 1.90 nightly and clippy 1.96.0: exit 0.
+
+An earlier version of this paragraph said the lints were new in clippy 1.96 and that clippy failed there; that was backwards. Note that on this machine Homebrew's `cargo-clippy` (1.96) comes before the rustup proxies on `PATH`, so `cargo +stable clippy` silently runs clippy 1.96 unless `~/.cargo/bin` is first; the 1.88 result above was taken with `~/.cargo/bin` first.
+
+**Doc-tests.** The two `compile_fail` doc-tests (`EphemeralKemKey::decapsulate` reuse, `ServerHandshake::into_session` reuse) imported `pq_transport_gateway::…`, but the library is named `pq_qkd_proxy`, so they failed on the bad import rather than on the move they illustrate. The `ServerHandshake` one also built its hello with `unimplemented!()`, after which the compiler does not borrow-check the rest, so it would not have failed even with the right import. Both are fixed: they import `pq_qkd_proxy`, and the handshake one takes the hello as a function argument. Checked by compiling each body as a standalone example: each fails with exactly one error, E0382, and compiles cleanly with the line that reuses the moved value removed. The `,E0382` tag on the blocks records the expected error; rustdoc 1.90 nightly and 1.96 did not enforce it in a test here (a block tagged E0382 that fails with another error still passed), so the example check above is what establishes it.
 
 | Target | Passed |
 |---|---|
@@ -200,3 +208,5 @@ Final run (`cargo +stable test`, debug, 2026-10-15), with `cargo fmt --all -- --
 | **Total** | **302, 0 failed, 0 ignored** |
 
 The relay test known to flake under load (`a_stale_or_future_dated_hello_is_refused`) passed in this run.
+
+**Rerun after the review fixes (2026-10-15, same toolchain).** Three full runs. The first passed 302 of 302 (exit 0). The second and third, with the machine at a load average of 63 to 71 from other jobs, each failed one test, that same relay test, in the binary's copy of the unit tests (301 passed, 1 failed, exit 101). It checks that a hello dated 121 s ahead is refused against a 120 s skew limit; when more than a second passes between building the hello and checking it, the hello falls inside the limit and is accepted, so the test fails. Run alone it passed 3 of 3. `src/relay.rs` is not changed on this branch (`git diff e50204d..HEAD -- src/relay.rs` is empty). The test needs a wider margin; that is a separate change.

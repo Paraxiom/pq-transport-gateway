@@ -213,8 +213,8 @@ impl EphemeralKemKey {
     ///
     /// Reusing an ephemeral key does not compile:
     ///
-    /// ```compile_fail
-    /// use pq_transport_gateway::EphemeralKemKey;
+    /// ```compile_fail,E0382
+    /// use pq_qkd_proxy::EphemeralKemKey;
     /// let key = EphemeralKemKey::new().unwrap();
     /// let ct = [0u8; 1088];
     /// let _ = key.decapsulate(&ct); // consumes the single-use key

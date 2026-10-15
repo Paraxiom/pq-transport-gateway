@@ -771,9 +771,7 @@ fn read_keypair(
     let alg = algo_from_tag(tag)?;
     if alg != expected_alg {
         return Err(anyhow!(
-            "Identity algorithm mismatch: expected {:?}, got {:?}",
-            expected_alg,
-            alg
+            "Identity algorithm mismatch: expected {expected_alg:?}, got {alg:?}"
         ));
     }
     let sk_bytes = read_length_prefixed(buf, cursor)?;
@@ -903,9 +901,7 @@ impl PqKeyExchange {
         let version = buf[4];
         if version != IDENTITY_FORMAT_VERSION {
             return Err(anyhow!(
-                "Unsupported identity format version: {} (expected {})",
-                version,
-                IDENTITY_FORMAT_VERSION
+                "Unsupported identity format version: {version} (expected {IDENTITY_FORMAT_VERSION})"
             ));
         }
         let mut cursor = 5;

@@ -238,7 +238,7 @@ impl QkdClient {
                 _ => anyhow!("ETSI 014 {}: {}", status, err.message),
             });
         }
-        Err(anyhow!("ETSI 014 {}: {}", status, body))
+        Err(anyhow!("ETSI 014 {status}: {body}"))
     }
 
     // ── Status (§5.1) ───────────────────────────────────────────────────────
@@ -318,8 +318,7 @@ impl QkdClient {
             .and_then(|n| u32::try_from(n).ok())
             .ok_or_else(|| {
                 anyhow!(
-                    "Key size {} bytes overflows u32 bit count for ETSI 014 wire format",
-                    size_bytes
+                    "Key size {size_bytes} bytes overflows u32 bit count for ETSI 014 wire format"
                 )
             })?;
         let req = EncKeysRequest {

@@ -126,7 +126,7 @@ impl Authenticator {
                 String::new()
             };
 
-            let key_id = format!("key-{}", line_no);
+            let key_id = format!("key-{line_no}");
 
             keys.insert(
                 key_id.clone(),

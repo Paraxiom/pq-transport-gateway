@@ -31,7 +31,7 @@ fn hex_decode(s: &str) -> Vec<u8> {
 }
 
 fn hex_encode(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{:02x}", x)).collect()
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 fn pattern(len: usize, a: usize, b: usize) -> Vec<u8> {

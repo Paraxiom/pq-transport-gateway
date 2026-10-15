@@ -178,13 +178,12 @@ fn print_identity_fingerprint() -> Result<()> {
     let key_path = std::env::var("PQTG_IDENTITY_KEY")
         .unwrap_or_else(|_| "/etc/pq-qkd-proxy/proxy.key".to_string());
 
-    let identity = PqKeyExchange::load_if_present(&key_path)?.ok_or_else(|| {
-        anyhow::anyhow!("No identity at {}. Run --generate-keys first.", key_path)
-    })?;
+    let identity = PqKeyExchange::load_if_present(&key_path)?
+        .ok_or_else(|| anyhow::anyhow!("No identity at {key_path}. Run --generate-keys first."))?;
 
     let fp = identity.identity_fingerprint();
     let formatted = format_fingerprint(&fp);
-    println!("{}", formatted);
+    println!("{formatted}");
     eprintln!();
     eprintln!("Distribute this fingerprint to clients out-of-band.");
     eprintln!("Clients pin it and reject any handshake whose ServerHello");
@@ -221,10 +220,9 @@ fn generate_proxy_keys() -> Result<()> {
 
     if Path::new(&key_path).exists() {
         return Err(anyhow::anyhow!(
-            "Identity already exists at {}; refusing to overwrite. \
+            "Identity already exists at {key_path}; refusing to overwrite. \
              Delete the file explicitly to force rotation (this invalidates \
-             every client's pinned vk).",
-            key_path
+             every client's pinned vk)."
         ));
     }
 
@@ -258,9 +256,9 @@ fn generate_proxy_keys() -> Result<()> {
         fs::set_permissions(&auth_keys_path, perms)?;
     }
 
-    println!("Identity (signing + verify):   {}", key_path);
-    println!("Public verify bundle:          {}", cert_path);
-    println!("Authorized keys template:      {}", auth_keys_path);
+    println!("Identity (signing + verify):   {key_path}");
+    println!("Public verify bundle:          {cert_path}");
+    println!("Authorized keys template:      {auth_keys_path}");
     println!();
     println!("Identity will be loaded on next startup. Distribute the public");
     println!("bundle (proxy.pub) to clients out-of-band for vk pinning.");

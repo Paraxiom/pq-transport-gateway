@@ -821,8 +821,7 @@ impl ProxyServer {
             let len = u32::from_be_bytes(len_buf) as usize;
             if len < MIN_SESSION_FRAME_BYTES {
                 return Err(anyhow!(
-                    "Request too small: {len} bytes (minimum {})",
-                    MIN_SESSION_FRAME_BYTES
+                    "Request too small: {len} bytes (minimum {MIN_SESSION_FRAME_BYTES})"
                 ));
             }
             if len > MAX_REQUEST_BYTES {

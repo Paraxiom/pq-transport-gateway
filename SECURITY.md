@@ -80,7 +80,9 @@ reuse voids what AES-GCM guarantees for those frames: the XOR of the two
 plaintexts is exposed and the GHASH authentication key of the session can be
 recovered. Each frame also carries a Falcon-512 signature inside the
 encryption, which still stops content the peer did not sign from being
-accepted, but does not restore confidentiality. Separately, the receiver
+accepted, but does not restore confidentiality, and does not stop content
+the peer did sign from being replayed into another position or session,
+because it covers the data only (THREAT-MODEL L6). Separately, the receiver
 accepted any nonce, so frames could be replayed or reordered within a
 session.
 

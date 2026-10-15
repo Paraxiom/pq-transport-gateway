@@ -21,7 +21,7 @@ Each section says what its tool assumes.
 | Fuzzing, 4 targets, 240 s each | 5,162,082 executions in total, 0 crashes, 0 artifacts |
 | cargo-mutants on the session code | 37 distinct mutants: 29 caught, 2 unviable, 6 missed. 3 of the missed were real gaps and are now caught by new tests; the other 3 are equivalent |
 | Kani (bounded model checking, cipher replaced by a model) | 1 of 7 harnesses verified (`session_nonce` injective); 2 hit a Kani limitation; 4 gave no verdict within 25 minutes |
-| Full test suite | green (numbers in the last section) |
+| Full test suite | all tests pass except one pre-existing relay timing test that fails intermittently under heavy machine load (details in the last section) |
 
 ## 1. Verifpal models
 
@@ -183,7 +183,7 @@ Neither was done. The previous session's bisection probes were removed.
 
 ## 7. Full test suite
 
-Final run (`cargo test --no-fail-fast`, debug, default toolchain nightly 1.90, 2026-10-15), with `cargo fmt --all -- --check` clean.
+Final run (`cargo test --no-fail-fast`, debug, 2026-10-15), with `cargo fmt --all -- --check` clean. The compiler for each run is named below.
 
 `cargo clippy --all-targets -- -D warnings` depends on the clippy version:
 - clippy 1.88.0 (the local `stable` alias): exit 101, 9 `uninlined_format_args` lints, all in code this branch did not change (`src/audit.rs`, `auth.rs`, `crypto.rs` persistence code, `proxy.rs`, `qkd_client.rs`; from commit e3bf2427). That lint was in clippy's default set on 1.88.
@@ -191,7 +191,7 @@ Final run (`cargo test --no-fail-fast`, debug, default toolchain nightly 1.90, 2
 
 An earlier version of this paragraph said the lints were new in clippy 1.96 and that clippy failed there; that was backwards. Note that on this machine Homebrew's `cargo-clippy` (1.96) comes before the rustup proxies on `PATH`, so `cargo +stable clippy` silently runs clippy 1.96 unless `~/.cargo/bin` is first; the 1.88 result above was taken with `~/.cargo/bin` first.
 
-**Doc-tests.** The two `compile_fail` doc-tests (`EphemeralKemKey::decapsulate` reuse, `ServerHandshake::into_session` reuse) imported `pq_transport_gateway::…`, but the library is named `pq_qkd_proxy`, so they failed on the bad import rather than on the move they illustrate. The `ServerHandshake` one also built its hello with `unimplemented!()`, after which the compiler does not borrow-check the rest, so it would not have failed even with the right import. Both are fixed: they import `pq_qkd_proxy`, and the handshake one takes the hello as a function argument. Checked by compiling each body as a standalone example: each fails with exactly one error, E0382, and compiles cleanly with the line that reuses the moved value removed. The `,E0382` tag on the blocks records the expected error; rustdoc 1.90 nightly and 1.96 did not enforce it in a test here (a block tagged E0382 that fails with another error still passed), so the example check above is what establishes it.
+**Doc-tests.** The two `compile_fail` doc-tests (`EphemeralKemKey::decapsulate` reuse, `ServerHandshake::into_session` reuse) imported `pq_transport_gateway::…`, but the library is named `pq_qkd_proxy`, so they failed on the bad import rather than on the move they illustrate. The `ServerHandshake` one also built its hello with `unimplemented!()`, after which the compiler does not borrow-check the rest, so it would not have failed even with the right import. Both are fixed: they import `pq_qkd_proxy`, and the handshake one takes the hello as a function argument. Checked by compiling each body as a standalone example: each fails with exactly one error, E0382, and compiles cleanly with the line that reuses the moved value removed. The blocks are tagged `compile_fail,E0382`. Rustdoc enforces that tag on nightly only: on nightly 1.90, the fixed doc-tests pass, and the same blocks with the old `pq_transport_gateway` import fail with "Some expected error codes were not found: [\"E0382\"]". On stable 1.96 the tag is ignored and a block that fails for any reason passes.
 
 | Target | Passed |
 |---|---|
@@ -209,4 +209,4 @@ An earlier version of this paragraph said the lints were new in clippy 1.96 and 
 
 The relay test known to flake under load (`a_stale_or_future_dated_hello_is_refused`) passed in this run.
 
-**Rerun after the review fixes (2026-10-15, same toolchain).** Three full runs. The first passed 302 of 302 (exit 0). The second and third, with the machine at a load average of 63 to 71 from other jobs, each failed one test, that same relay test, in the binary's copy of the unit tests (301 passed, 1 failed, exit 101). It checks that a hello dated 121 s ahead is refused against a 120 s skew limit; when more than a second passes between building the hello and checking it, the hello falls inside the limit and is accepted, so the test fails. Run alone it passed 3 of 3. `src/relay.rs` is not changed on this branch (`git diff e50204d..HEAD -- src/relay.rs` is empty). The test needs a wider margin; that is a separate change.
+**Rerun after the review fixes (2026-10-15).** On this machine Homebrew's `rustc` 1.96 also comes before the rustup proxies on `PATH`, so the toolchain of each run was read from the test binaries (`/rustc/<commit>` strings). The first run was built by rustc 1.96.0 (Homebrew) and passed 302 of 302 (exit 0). The next runs were built by nightly 1.90 with `~/.cargo/bin` first on `PATH`. With the machine at a load average of 63 to 71 from other jobs, two of them each failed one test, that same relay test, in the binary's copy of the unit tests (301 passed, 1 failed, exit 101). It checks that a hello dated 121 s ahead is refused against a 120 s skew limit; when more than a second passes between building the hello and checking it, the hello falls inside the limit and is accepted, so the test fails. Run alone it passed 3 of 3. A fourth full run on nightly 1.90, at a load average near 40, passed 302 of 302 (exit 0). `src/relay.rs` is not changed on this branch (`git diff e50204d..HEAD -- src/relay.rs` is empty). The test needs a wider margin; that is a separate change.

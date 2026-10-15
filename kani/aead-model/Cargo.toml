@@ -1,0 +1,11 @@
+[package]
+name = "pqtg-aead-model"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Kani only: the aes-gcm API PQTG uses, with AES-256-GCM replaced by an oracle-driven model."
+license = "GPL-3.0-only"
+
+[dependencies]
+# The real crate, re-exported for everything except the cipher itself.
+aes-gcm = "0.10"

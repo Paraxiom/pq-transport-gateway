@@ -1,0 +1,108 @@
+// PQTG gateway record layer BEFORE the fix: wire 2.0 / 3.1 (regression model)
+// ---------------------------------------------------------------------------
+// Identical to pqtg-gateway-session.vp except for the keys: until wire 2.0 /
+// 3.1, PqSession used the session key itself as the one AES-256-GCM key for
+// both directions, with both nonce counters starting at 0. So a request and
+// the response at the same position were sealed under the same key AND the
+// same nonce. This file exists to show what the model of the fixed design is
+// able to detect; it describes no shipped wire version.
+//
+// Two requests and two responses over one established gateway session, in the
+// order handle_session runs them (request, response, request, response).
+//
+//   session_key   = HASH(lbl_session, ss), with the handshake stood in for by
+//                   a guarded ephemeral KEM, exactly as in
+//                   pqtg-gateway-session.vp.
+//   frame n       = AEAD_ENC(session_key, n_n, m, nil) in BOTH directions:
+//                   AES-256-GCM, no associated data, nonce = be32(0) || be64(n),
+//                   each direction counting from 0. So request n and response
+//                   n share the key and the nonce.
+//   receive       AEAD_DEC(...)? at the slot's own nonce.
+//
+// What this model does NOT reproduce of the old code: before 2.1 / 3.2,
+// decrypt() accepted a frame at ANY nonce. This model keeps the strict
+// receive rule of the fixed code and changes only the keys, so it isolates
+// the cross-direction nonce reuse. The old code was weaker than this model,
+// not stronger.
+//
+// Verifpal 1.4.10 reports AEAD nonce reuse: two ciphertexts under the same
+// key and nonce let the attacker recover the plaintexts and forge under that
+// pair. For confidentiality that is a symbolic over-approximation (real
+// AES-GCM nonce reuse gives the XOR of the two plaintexts, which is total
+// recovery only when one of them is known or guessable); for authentication
+// it matches the real attack (two GCM messages under one key and nonce let
+// the attacker solve for the GHASH key, Joux's "forbidden attack", and then
+// forge tags under that nonce).
+//
+// The inner Falcon-512 signature is left out, as in pqtg-gateway-session.vp;
+// pqtg-gateway-session-onekey-signed.vp adds it.
+//
+// Queries: as in pqtg-gateway-session.vp.
+
+attacker[active]
+
+principal Client[
+    knows public lbl_session, n0, n1
+    generates dk
+    ek = PUBKEY(dk)
+    generates req0, req1
+]
+
+principal Server[
+    knows public lbl_session, n0, n1
+    generates r
+    generates resp0, resp1
+]
+
+Client -> Server: [ek]
+
+principal Server[
+    ss, ct = KEM_ENCAP(ek, r)
+    sk_s = HASH(lbl_session, ss)
+]
+
+Server -> Client: [ct]
+
+principal Client[
+    ss_c = KEM_DECAP(dk, ct)
+    sk_c = HASH(lbl_session, ss_c)
+    q0 = AEAD_ENC(sk_c, n0, req0, nil)
+]
+
+Client -> Server: q0
+
+principal Server[
+    req0_s = AEAD_DEC(sk_s, n0, q0, nil)?
+    a0 = AEAD_ENC(sk_s, n0, resp0, nil)
+]
+
+Server -> Client: a0
+
+principal Client[
+    resp0_c = AEAD_DEC(sk_c, n0, a0, nil)?
+    q1 = AEAD_ENC(sk_c, n1, req1, nil)
+]
+
+Client -> Server: q1
+
+principal Server[
+    req1_s = AEAD_DEC(sk_s, n1, q1, nil)?
+    a1 = AEAD_ENC(sk_s, n1, resp1, nil)
+]
+
+Server -> Client: a1
+
+principal Client[
+    resp1_c = AEAD_DEC(sk_c, n1, a1, nil)?
+]
+
+queries[
+    confidentiality? req0
+    confidentiality? req1
+    confidentiality? resp0
+    confidentiality? resp1
+    authentication? Client -> Server: q0
+    authentication? Client -> Server: q1
+    authentication? Server -> Client: a0
+    authentication? Server -> Client: a1
+]

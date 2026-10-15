@@ -1,6 +1,6 @@
 # PQTG formal verification (B1)
 
-**Symbolic** model of the PQTG v2 handshake, in [Verifpal](https://verifpal.com). This is item **B1** of the assurance backlog (`the assurance backlog`) and the headline assurance deliverable: a formally-verified post-quantum handshake *with* a QKD hybrid — a claim the free tools (Rosenpass, PQ-Noise) cannot make, because they have no QKD leg.
+**Symbolic** model of the PQTG v2 handshake, in [Verifpal](https://verifpal.com). This is item **B1** of the assurance backlog (`the assurance backlog`) and the headline assurance deliverable: a post-quantum handshake *with* a QKD hybrid, symbolically verified under the model's assumptions (bounded sessions, ideal primitives; see "Honest scope" below) — a claim the free tools (Rosenpass, PQ-Noise) cannot make, because they have no QKD leg.
 
 **Status (2026-09-12): M1 done — the model has been run, with Verifpal 1.4.10.** Base model: all three queries hold (`c0c0a0`, unchanged from 2 to 3 sessions). The hybrid property holds in the "KEM broken, QKD saves it" direction; the "QKD broken, KEM saves it" direction exposes a real gap on the server side (no client authentication in the handshake, THREAT-MODEL L2) and a Verifpal artifact on the client side. Full results, traces, change log and findings: **`VERIFICATION-RESULTS-2026-09-12.md`**. Read it before quoting any of this.
 
@@ -63,7 +63,7 @@ Both legs leaked at once is expected to fail and was not run.
 - **Primitives are ideal.** ML-KEM-768 as Verifpal's KEM (decapsulation reveals the randomness, as FIPS 203 does), Falcon-512 as an ideal signature, SHA3-256 as an ideal hash.
 - **Pinning is assumed, not implemented.** See above and THREAT-MODEL L2.
 - **Client authentication is out of scope of the handshake** and the model shows the cost: PQTG authenticates the *server* explicitly (transcript_sig); the *client* is authorized by an allow-list check at ClientHello (`verify_client`) and authenticated per message once the `PqSession` is up (`decrypt_and_verify`). Possession of the KEM key is never proven in the handshake, which is what F1 in the results document exploits when the QKD leg is absent.
-- **Omitted:** `falcon_vk`/`slh_dsa_vk` on the wire, `requested_key_size`, `version`, the no-QKD degrade path (`pqc_secret` alone, with no signal to the client), downgrade/version negotiation, the relay handshake (different transcript, directional keys, no QKD mix), and the gateway session layer after the handshake (record keys, nonces, sequencing; see the 2026-10-14 note below).
+- **Omitted:** `falcon_vk`/`slh_dsa_vk` on the wire, `requested_key_size`, `version`, the no-QKD degrade path (`pqc_secret` alone, with no signal to the client), downgrade/version negotiation, the relay handshake (different transcript, directional keys, no QKD mix), and the gateway session layer after the handshake (record keys, nonces, sequencing), which has its own models since 2026-10-15 (see "Gateway session layer" below).
 
 ## Next steps
 1. ~~M1: install Verifpal, run the base model green, commit the output.~~ Done 2026-09-12 (outputs saved; commit is the user's call).
@@ -72,13 +72,29 @@ Both legs leaked at once is expected to fail and was not run.
 4. Report the two Verifpal issues (F3 artifact, F4 missed attack) upstream with `repro/`.
 5. Model the **no-QKD degrade** path and a **downgrade** query; try `--auto-queries` for freshness.
 6. Longer horizon: a **computational** obligation (CryptoVerif) or a Lean protocol-level lemma, to move from "symbolically verified" to "proven."
-7. Model the **gateway record layer** (one key per direction, per-direction nonces, strict sequencing, a request and a response) as `pqtg-relay-ratchet.vp` does for the relay. Not done.
+7. Model the **gateway record layer** (one key per direction, per-direction nonces, strict sequencing, a request and a response) as `pqtg-relay-ratchet.vp` does for the relay. Done 2026-10-15: `pqtg-gateway-session*.vp`, results in `GATEWAY-SESSION-RESULTS-2026-10-15.md`.
 
 Keep this model in lockstep with `src/crypto.rs`/`src/proxy.rs`: if the handshake changes, the model and this mapping change with it, or the proof is fiction.
 
 **Key schedule change, 2026-09-12 (wire `3.1`, `relay-4`, backlog B2/B3).** The implementation moved every v3 and relay hash to a domain tree and every key derivation to a keyed PRF and chaining key (`src/kdf.rs`, `docs/KEY-SCHEDULE.md`). The models abstract each derivation as a one-way function of its inputs with distinct label constants; they do not depend on the concrete constants or on keyed versus unkeyed hashing, and the same secrets still enter the same derivations in the same order. The symbolic shape is therefore unchanged and the results in this directory stand for `3.1` and `relay-4` as written; no model was re-run for this change. The binding between the models and the code is kept by the known-answer vectors (`tests/kdf_kat.rs`).
 
-**Session layer change, 2026-10-14 (wire `3.2` and `2.1`).** No gateway model here covers the session layer: they end at `session_key_s`/`session_key_c` and query their confidentiality and server authentication. Until `3.1` and `2.0` that layer used the session key as the AES-256-GCM key for both directions with both nonce counters at 0, which reused nonces across directions, and it accepted frames at any nonce. Nothing in this directory claimed otherwise, and nothing here could have detected it. Since `3.2` and `2.1` the session key is expanded into one key per direction (`docs/KEY-SCHEDULE.md` §5) and frames are strictly sequenced. The results above stand unchanged, because the new step comes after the keys they reason about; no model was re-run. Next step 7 is the model that would cover it.
+**Session layer change, 2026-10-14 (wire `3.2` and `2.1`).** No gateway model here covers the session layer: they end at `session_key_s`/`session_key_c` and query their confidentiality and server authentication. Until `3.1` and `2.0` that layer used the session key as the AES-256-GCM key for both directions with both nonce counters at 0, which reused nonces across directions, and it accepted frames at any nonce. Nothing in this directory claimed otherwise, and nothing here could have detected it. Since `3.2` and `2.1` the session key is expanded into one key per direction (`docs/KEY-SCHEDULE.md` §5) and frames are strictly sequenced. The results above stand unchanged, because the new step comes after the keys they reason about; no model was re-run. Next step 7 is the model that would cover it. **Update 2026-10-15:** it now exists; see "Gateway session layer" below.
+
+## Gateway session layer (added 2026-10-15)
+
+The record layer the gateway runs after the handshake (`PqSession` in `src/crypto.rs`, wire `3.2` and `2.1`): two requests and two responses over one session, the handshake stood in for by a guarded ephemeral KEM as in `pqtg-relay-ratchet.vp`. Queries: confidentiality of each request and response, authentication of each frame. Codes in query order `req0 req1 resp0 resp1 q0 q1 a0 a1`; identical at 1 session, 2 sessions and `--saturate` (unchanged 2 to 3) for every file.
+
+| File | What it is | Code |
+|---|---|---|
+| `pqtg-gateway-session.vp` | the fixed record layer: `k_c2s`, `k_s2c`, strict receive | `c0c0c0c0a0a0a0a0` |
+| `pqtg-gateway-session-signed.vp` | the same plus the inner Falcon-512 signature (`sign_and_encrypt`) | `c0c0c0c0a0a0a0a0` |
+| `pqtg-gateway-session-onekey.vp` | regression: one key for both directions (wire 2.0 / 3.1), strict receive kept | `c1c1c1c1a0a0a1a1` |
+| `pqtg-gateway-session-onekey-signed.vp` | regression plus the inner signature | `c1c1c1c1a0a0a1a1` |
+| `pqtg-gateway-session-leak-c2s.vp` | fixed design, `k_c2s` leaked before any frame | `c1c1c0c0a1a1a0a0` |
+| `pqtg-gateway-session-leak-s2c.vp` | fixed design, `k_s2c` leaked before any frame | `c0c0c1c1a0a0a1a1` |
+| `pqtg-gateway-session-signed-leak-c2s.vp` | signed frames, `k_c2s` leaked | `c1c1c0c0a1a1a0a0` |
+
+Reading, limits, and the property tests, fuzzing, mutation testing and Kani harnesses run with them: **`GATEWAY-SESSION-RESULTS-2026-10-15.md`**.
 
 ## Relay handshake (added 2026-09-12)
 

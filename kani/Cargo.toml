@@ -1,0 +1,28 @@
+[package]
+name = "pqtg-kani"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Kani harnesses (bounded model checks) for the gateway session layer (src/crypto.rs PqSession), on the unmodified source."
+license = "GPL-3.0-only"
+
+# Standalone, like fuzz/: never part of the gateway's own build.
+[workspace]
+
+# src/crypto.rs and src/kdf.rs are compiled verbatim (see build.rs and
+# src/lib.rs). Their dependencies are the gateway's, at the gateway's
+# versions (Cargo.lock is a copy of the gateway's), with one substitution:
+# the name `aes_gcm` resolves to the model in aead-model/, which re-exports the
+# real aes-gcm API and replaces only the cipher.
+[dependencies]
+aes-gcm = { package = "pqtg-aead-model", path = "aead-model" }
+anyhow = "1.0"
+base64 = "0.21"
+hmac = "0.12"
+paraxiom-pqc = { git = "https://github.com/Paraxiom/paraxiom-pqc.git" }
+rand = "0.8"
+sha3 = "0.10"
+zeroize = { version = "1.7", features = ["derive"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

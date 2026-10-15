@@ -1,0 +1,60 @@
+──────────────────────────────────────────────────
+  ◆ Verifpal 1.4.10 · https://verifpal.com
+──────────────────────────────────────────────────
+ Verifpal ◆ Verification initiated for 'pqtg-gateway-session-signed-leak-c2s.vp' at 06:13:59 AM.
+     Info ● Analyzing 2 parallel sessions per principal; per-session values and principals are suffixed #2.
+     Info ● Attacker is configured as active.
+     Info ● Running at phase 0.
+
+[2K  phase 0 · Client · running · 0/8 queries resolved · 0ms
+[2K     Fail ✗ confidentiality? req0 (Analysis 1)
+     Fail ✗ confidentiality? req1 (Analysis 1)
+     Fail ✗ authentication? Client -> Server: q0 (Analysis 11)
+     Fail ✗ authentication? Client -> Server: q1 (Analysis 13)
+
+──────────────────────────────────────────────────
+ Verifpal ◆ Verification completed for 'pqtg-gateway-session-signed-leak-c2s.vp' at 06:13:59 AM in 71ms.
+
+     Fail ✗ confidentiality? req0
+            ╭─ Attack trace:
+            │ 1. Attacker observes q0 on the wire.
+            │ 2. Attacker is handed c2s_c by a leaks declaration.
+            │ 3. Attacker opens q0 with c2s_s, n0, obtaining p0.
+            │ 4. Attacker splits p0 and takes req0.
+            ╰▸ req0 (req0) is obtained by Attacker.
+     Fail ✗ confidentiality? req1
+            ╭─ Attack trace:
+            │ 1. Attacker observes q1 on the wire.
+            │ 2. Attacker is handed c2s_c by a leaks declaration.
+            │ 3. Attacker opens q1 with c2s_s, n1, obtaining p1.
+            │ 4. Attacker splits p1 and takes req1.
+            ╰▸ req1 (req1) is obtained by Attacker.
+     Pass ✓ confidentiality? resp0  [search exhausted at 2 sessions]
+     Pass ✓ confidentiality? resp1  [search exhausted at 2 sessions]
+     Fail ✗ authentication? Client -> Server: q0
+            ╭─ Attack trace:
+            │ 1. Attacker is handed c2s_c by a leaks declaration.
+            │ 2. Attacker observes AEAD_ENC(c2s_s#2, n0, CONCAT(req0#2, SIGN(client_sk, req0#2)), nil) on the wire.
+            │ 3. Attacker is handed c2s_c#2 by a leaks declaration.
+            │ 4. Attacker opens AEAD_ENC(c2s_s#2, n0, CONCAT(req0#2, SIGN(client_sk, req0#2)), nil) with c2s_s#2, n0, obtaining CONCAT(req0#2, SIGN(client_sk, req0#2)).
+            │ 5. Attacker constructs AEAD_ENC(c2s_s, n0, CONCAT(req0#2, SIGN(client_sk, req0#2)), nil).
+            │ 6. Attacker replaces q0 (sent by Client to Server) with AEAD_ENC(c2s_s, n0, CONCAT(req0#2, SIGN(client_sk, req0#2)), nil). (q0 was AEAD_ENC(c2s_c, n0, CONCAT(req0, SIGN(client_sk, req0)), nil))
+            │ 7. Server's AEAD_DEC(c2s_s, n0, AEAD_ENC(c2s_s, n0, CONCAT(req0#2, SIGN(client_sk, req0#2)), nil), nil)? passes — the attacker controls one of its inputs.
+            │ 8. Server's SIGNVERIF(client_vk, SPLIT(AEAD_DEC(c2s_s, n0, AEAD_ENC(c2s_s, n0, CONCAT(req0#2, SIGN(client_sk, req0#2)), nil), nil)?)|1, SPLIT(AEAD_DEC(c2s_s, n0, AEAD_ENC(c2s_s, n0, CONCAT(req0#2, SIGN(client_sk, req0#2)), nil), nil)?)|2)? passes — the attacker controls one of its inputs.
+            ╰▸ q0 (AEAD_ENC(c2s_s, n0, CONCAT(req0#2, SIGN(client_sk, req0#2)), nil)), sent by Attacker and not by Client, is successfully used in AEAD_DEC(c2s_s, n0, q0, nil)? within Server's state.
+     Fail ✗ authentication? Client -> Server: q1
+            ╭─ Attack trace:
+            │ 1. Attacker is handed c2s_c by a leaks declaration.
+            │ 2. Attacker observes q0 on the wire.
+            │ 3. Attacker opens q0 with c2s_s, n0, obtaining p0.
+            │ 4. Attacker constructs AEAD_ENC(c2s_s, n1, p0, nil).
+            │ 5. Attacker replaces q1 (sent by Client to Server) with AEAD_ENC(c2s_s, n1, p0, nil). (q1 was AEAD_ENC(c2s_c, n1, CONCAT(req1, SIGN(client_sk, req1)), nil))
+            │ 6. Server's AEAD_DEC(c2s_s, n1, AEAD_ENC(c2s_s, n1, p0, nil), nil)? passes — the attacker controls one of its inputs.
+            │ 7. Server's SIGNVERIF(client_vk, SPLIT(AEAD_DEC(c2s_s, n1, AEAD_ENC(c2s_s, n1, p0, nil), nil)?)|1, SPLIT(AEAD_DEC(c2s_s, n1, AEAD_ENC(c2s_s, n1, p0, nil), nil)?)|2)? passes — the attacker controls one of its inputs.
+            ╰▸ q1 (AEAD_ENC(c2s_s, n1, p0, nil)), sent by Attacker and not by Client, is successfully used in AEAD_DEC(c2s_s, n1, q1, nil)? within Server's state.
+     Pass ✓ authentication? Server -> Client: a0  [search exhausted at 2 sessions]
+     Pass ✓ authentication? Server -> Client: a1  [search exhausted at 2 sessions]
+
+──────────────────────────────────────────────────
+     Fail ✗ 4 of 8 queries failed.
+ Verifpal ◆ Thank you for using Verifpal.

@@ -1,0 +1,93 @@
+// PQTG gateway session frames BEFORE the fix, inner signatures included:
+// wire 2.0 / 3.1 (regression model)
+// ---------------------------------------------------------------------------
+// pqtg-gateway-session-signed.vp with the keys of wire 2.0 / 3.1: the session
+// key itself sealed both directions and both counters started at 0. This file
+// asks what the inner Falcon-512 signature did and did not save in that
+// design; it describes no shipped wire version.
+//
+// Model body as in pqtg-gateway-session-signed.vp; only the keys differ.
+
+attacker[active]
+
+principal Client[
+    knows public lbl_session, n0, n1
+    knows private client_sk
+    client_vk = PUBKEY(client_sk)
+    generates dk
+    ek = PUBKEY(dk)
+    generates req0, req1
+]
+
+principal Server[
+    knows public lbl_session, n0, n1
+    knows private server_sk
+    server_vk = PUBKEY(server_sk)
+    generates r
+    generates resp0, resp1
+]
+
+Client -> Server: [client_vk]
+
+Server -> Client: [server_vk]
+
+Client -> Server: [ek]
+
+principal Server[
+    ss, ct = KEM_ENCAP(ek, r)
+    sk_s = HASH(lbl_session, ss)
+]
+
+Server -> Client: [ct]
+
+principal Client[
+    ss_c = KEM_DECAP(dk, ct)
+    sk_c = HASH(lbl_session, ss_c)
+    q0 = AEAD_ENC(sk_c, n0, CONCAT(req0, SIGN(client_sk, req0)), nil)
+]
+
+Client -> Server: q0
+
+principal Server[
+    p0 = AEAD_DEC(sk_s, n0, q0, nil)?
+    req0_s, qsig0 = SPLIT(p0)
+    qok0 = SIGNVERIF(client_vk, req0_s, qsig0)?
+    a0 = AEAD_ENC(sk_s, n0, CONCAT(resp0, SIGN(server_sk, resp0)), nil)
+]
+
+Server -> Client: a0
+
+principal Client[
+    r0 = AEAD_DEC(sk_c, n0, a0, nil)?
+    resp0_c, asig0 = SPLIT(r0)
+    aok0 = SIGNVERIF(server_vk, resp0_c, asig0)?
+    q1 = AEAD_ENC(sk_c, n1, CONCAT(req1, SIGN(client_sk, req1)), nil)
+]
+
+Client -> Server: q1
+
+principal Server[
+    p1 = AEAD_DEC(sk_s, n1, q1, nil)?
+    req1_s, qsig1 = SPLIT(p1)
+    qok1 = SIGNVERIF(client_vk, req1_s, qsig1)?
+    a1 = AEAD_ENC(sk_s, n1, CONCAT(resp1, SIGN(server_sk, resp1)), nil)
+]
+
+Server -> Client: a1
+
+principal Client[
+    r1 = AEAD_DEC(sk_c, n1, a1, nil)?
+    resp1_c, asig1 = SPLIT(r1)
+    aok1 = SIGNVERIF(server_vk, resp1_c, asig1)?
+]
+
+queries[
+    confidentiality? req0
+    confidentiality? req1
+    confidentiality? resp0
+    confidentiality? resp1
+    authentication? Client -> Server: q0
+    authentication? Client -> Server: q1
+    authentication? Server -> Client: a0
+    authentication? Server -> Client: a1
+]

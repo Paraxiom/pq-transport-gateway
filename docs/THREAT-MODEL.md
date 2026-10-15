@@ -138,7 +138,7 @@ state in their READMEs that they have never been independently audited.
 |-----------------------------------------------------|-------------------------|-----------------------------------------------------------------------------------------------------------------------------|
 | ML-KEM-768 key agreement converges                  | **Proved by test**      | `crypto.rs::tests::ml_kem_handshake_produces_matching_shared_secret`                                                        |
 | Transcript binds randoms + identities               | **Proved by test**      | `crypto.rs::tests::full_handshake_session_keys_match`, `tampered_transcript_fails_verification`                             |
-| No AES-GCM (key, nonce) pair repeats in a session, in either direction; replayed, reordered and reflected frames refused | **Tested**, not proved | `crypto.rs::tests::{client_and_server_first_frames_never_share_a_key_and_nonce, a_frame_reflected_to_its_sender_is_rejected, a_replayed_frame_is_rejected_and_the_stream_survives, an_out_of_order_frame_is_rejected_and_the_stream_survives, both_counters_refuse_to_wrap}` and `tests/gateway_session.rs`. Until wire `2.1` / `3.2` this row read "AES-GCM nonces never repeat under same key: Proved by test" on the strength of `nonce_counter_advances_per_message`, which checks one direction only; across the two directions the claim was false. |
+| No AES-GCM (key, nonce) pair repeats in a session, in either direction; replayed, reordered and reflected frames refused | **Tested**, not proved | `crypto.rs::tests::{client_and_server_first_frames_never_share_a_key_and_nonce, a_frame_reflected_to_its_sender_is_rejected, a_replayed_frame_is_rejected_and_the_stream_survives, an_out_of_order_frame_is_rejected_and_the_stream_survives, both_counters_refuse_to_wrap}` and `tests/gateway_session.rs`; model-based property tests against a reference model (`tests/session_model.rs`, 65,536 cases per variant on 2026-10-15); fuzzing of the frame path (`fuzz/`); symbolic Verifpal models of the record layer, bounded at 3 sessions (`formal/pqtg-gateway-session*.vp`). None of this is a proof; see `formal/GATEWAY-SESSION-RESULTS-2026-10-15.md` for what each run covers. Until wire `2.1` / `3.2` this row read "AES-GCM nonces never repeat under same key: Proved by test" on the strength of `nonce_counter_advances_per_message`, which checks one direction only; across the two directions the claim was false. |
 | Sign-and-encrypt round-trip preserves data + signer | **Proved by test**      | `crypto.rs::tests::sign_and_encrypt_roundtrip_with_real_kex`                                                                |
 | ETSI 014 v1.1.1 wire format conformance             | **Proved by test**      | `tests/etsi014_emulator.rs` — 9 integration tests against `httpmock` KME                                                    |
 | FIPS 203/204/205 parameter conformance              | **Proved by Lean**      | `lean/PQTGProofs/{MLKem,Falcon,Sphincs,Auth,Session,KeyMixing,ETSI014,Handshake}.lean` — 95 lemmas total, zero sorries        |
@@ -181,6 +181,21 @@ state in their READMEs that they have never been independently audited.
 - **L4** No DoS mitigation beyond `max_connections` / `connection_timeout`.
 - **L5** No protocol-level mechanism for revocation of an authorized vk
   beyond editing the file and restarting.
+- **L6** The per-message Falcon signature inside a gateway session
+  (`PqSession::sign_and_encrypt`) covers the message data only: no
+  session id, no direction, no position. While the record keys are
+  secret this costs nothing, because the record layer already binds the
+  frame to its session, direction and position. If one direction key
+  leaks, it no longer does: an attacker holding `k_c2s` can re-seal a
+  request the client really signed at a later position of the same
+  session, or into another session whose `k_c2s` it also holds, and the
+  gateway accepts it. It still cannot make a request the client never
+  signed, and the other direction keeps confidentiality and
+  authenticity. Shown on the code by `tests/session_key_leak.rs` and
+  symbolically by `formal/pqtg-gateway-session-signed-leak-c2s.vp`
+  (`formal/GATEWAY-SESSION-RESULTS-2026-10-15.md`). Closing it means
+  signing the session id, direction and counter with the data, which is
+  a wire change; not done.
 
 ## 7. Review questions for ETSI ISG-QKD
 

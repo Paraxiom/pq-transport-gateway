@@ -1,0 +1,24 @@
+──────────────────────────────────────────────────
+  ◆ Verifpal 1.4.10 · https://verifpal.com
+──────────────────────────────────────────────────
+ Verifpal ◆ Verification initiated for 'pqtg-gateway-session.vp' at 06:13:57 AM.
+     Info ● Attacker is configured as active.
+     Info ● Running at phase 0.
+
+[2K  phase 0 · Client · running · 0/8 queries resolved · 0ms
+[2K
+──────────────────────────────────────────────────
+ Verifpal ◆ Verification completed for 'pqtg-gateway-session.vp' at 06:13:57 AM in 5ms.
+
+     Pass ✓ confidentiality? req0  [search exhausted at 1 session]
+     Pass ✓ confidentiality? req1  [search exhausted at 1 session]
+     Pass ✓ confidentiality? resp0  [search exhausted at 1 session]
+     Pass ✓ confidentiality? resp1  [search exhausted at 1 session]
+     Pass ✓ authentication? Client -> Server: q0  [search exhausted at 1 session]
+     Pass ✓ authentication? Client -> Server: q1  [search exhausted at 1 session]
+     Pass ✓ authentication? Server -> Client: a0  [search exhausted at 1 session]
+     Pass ✓ authentication? Server -> Client: a1  [search exhausted at 1 session]
+
+──────────────────────────────────────────────────
+     Pass ✓ All 8 queries pass.
+ Verifpal ◆ Thank you for using Verifpal.

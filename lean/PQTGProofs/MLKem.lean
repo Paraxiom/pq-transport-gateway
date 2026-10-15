@@ -7,7 +7,8 @@
   the moduli, dimensions, and byte sizes used by `paraxiom-pqc::kem` match
   the standard. It does NOT prove IND-CCA security or implementation
   correctness of the underlying lattice arithmetic; those are inherited
-  as assumptions from FIPS 203 and from the audited `ml-kem` crate.
+  as assumptions from FIPS 203 and from the `ml-kem` crate, which states
+  in its README that it has never been independently audited.
 
   Mirrors: src/crypto.rs (KEM_ALG = MlKem768; encapsulate_to, EphemeralKemKey).
 -/

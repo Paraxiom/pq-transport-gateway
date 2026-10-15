@@ -1,0 +1,51 @@
+──────────────────────────────────────────────────
+  ◆ Verifpal 1.4.10 · https://verifpal.com
+──────────────────────────────────────────────────
+ Verifpal ◆ Verification initiated for 'pqtg-gateway-session-leak-c2s.vp' at 06:13:59 AM.
+     Info ● Analyzing 2 parallel sessions per principal; per-session values and principals are suffixed #2.
+     Info ● Attacker is configured as active.
+     Info ● Running at phase 0.
+
+[2K  phase 0 · Client · running · 0/8 queries resolved · 0ms
+[2K     Fail ✗ confidentiality? req0 (Analysis 1)
+     Fail ✗ confidentiality? req1 (Analysis 1)
+     Fail ✗ authentication? Client -> Server: q0 (Analysis 11)
+     Fail ✗ authentication? Client -> Server: q1 (Analysis 12)
+
+──────────────────────────────────────────────────
+ Verifpal ◆ Verification completed for 'pqtg-gateway-session-leak-c2s.vp' at 06:13:59 AM in 42ms.
+
+     Fail ✗ confidentiality? req0
+            ╭─ Attack trace:
+            │ 1. Attacker observes q0 on the wire.
+            │ 2. Attacker is handed c2s_c by a leaks declaration.
+            │ 3. Attacker opens q0 with c2s_s, n0, obtaining req0.
+            ╰▸ req0 (req0) is obtained by Attacker.
+     Fail ✗ confidentiality? req1
+            ╭─ Attack trace:
+            │ 1. Attacker observes q1 on the wire.
+            │ 2. Attacker is handed c2s_c by a leaks declaration.
+            │ 3. Attacker opens q1 with c2s_s, n1, obtaining req1.
+            ╰▸ req1 (req1) is obtained by Attacker.
+     Pass ✓ confidentiality? resp0  [search exhausted at 2 sessions]
+     Pass ✓ confidentiality? resp1  [search exhausted at 2 sessions]
+     Fail ✗ authentication? Client -> Server: q0
+            ╭─ Attack trace:
+            │ 1. Attacker is handed c2s_c by a leaks declaration.
+            │ 2. Attacker constructs AEAD_ENC(c2s_s, n0, nil, nil).
+            │ 3. Attacker replaces q0 (sent by Client to Server) with AEAD_ENC(c2s_s, n0, nil, nil). (q0 was AEAD_ENC(c2s_c, n0, req0, nil))
+            │ 4. Server's AEAD_DEC(c2s_s, n0, AEAD_ENC(c2s_s, n0, nil, nil), nil)? passes — the attacker controls one of its inputs.
+            ╰▸ q0 (AEAD_ENC(c2s_s, n0, nil, nil)), sent by Attacker and not by Client, is successfully used in AEAD_DEC(c2s_s, n0, q0, nil)? within Server's state.
+     Fail ✗ authentication? Client -> Server: q1
+            ╭─ Attack trace:
+            │ 1. Attacker is handed c2s_c by a leaks declaration.
+            │ 2. Attacker constructs AEAD_ENC(c2s_s, n1, nil, nil).
+            │ 3. Attacker replaces q1 (sent by Client to Server) with AEAD_ENC(c2s_s, n1, nil, nil). (q1 was AEAD_ENC(c2s_c, n1, req1, nil))
+            │ 4. Server's AEAD_DEC(c2s_s, n1, AEAD_ENC(c2s_s, n1, nil, nil), nil)? passes — the attacker controls one of its inputs.
+            ╰▸ q1 (AEAD_ENC(c2s_s, n1, nil, nil)), sent by Attacker and not by Client, is successfully used in AEAD_DEC(c2s_s, n1, q1, nil)? within Server's state.
+     Pass ✓ authentication? Server -> Client: a0  [search exhausted at 2 sessions]
+     Pass ✓ authentication? Server -> Client: a1  [search exhausted at 2 sessions]
+
+──────────────────────────────────────────────────
+     Fail ✗ 4 of 8 queries failed.
+ Verifpal ◆ Thank you for using Verifpal.

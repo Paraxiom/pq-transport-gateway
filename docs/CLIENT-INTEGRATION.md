@@ -10,18 +10,22 @@ clients verify they're talking to the *legitimate* PQTG server and not
 an attacker who has substituted their own Falcon vk.
 
 This repo currently does not ship a reference client. Until one lands,
-this doc is the contract.
+this doc is the contract. `tests/gateway_session.rs` holds a minimal client
+written from it (v2 and v3 handshakes, the session loop of §2.1), run against
+a real gateway over TCP.
 
 ---
 
 ## 1. Wire protocol (v2)
 
 ```
-ClientHello { version: "2.0", client_random[32], kem_ek, falcon_vk, slh_dsa_vk, requested_key_size }
-ServerHello { version: "2.0", server_random[32], falcon_vk, slh_dsa_vk, kem_ciphertext, transcript_sig }
+ClientHello { version: "2.1", client_random[32], kem_ek, falcon_vk, slh_dsa_vk, requested_key_size }
+ServerHello { version: "2.1", server_random[32], falcon_vk, slh_dsa_vk, kem_ciphertext, transcript_sig }
 ```
 
 Frames are length-prefixed: `[len: u32 BE][bincode-serialized struct]`.
+The v3 handshake (wire `"3.2"`) is specified in `PROTOCOL-V3-QKD-KEYID.md`;
+its session layer is the one in §2 step 8 and §2.1 below.
 
 Both sides compute:
 
@@ -35,11 +39,12 @@ transcript  = SHA3-256("pqtg-transcript-v2"
 kem_ss      = ML-KEM-768.Decapsulate(client_dk, kem_ciphertext)        (client side)
             = (returned by ML-KEM-768.Encapsulate(client_ek))           (server side)
 
-session_key = SHA3-256("pqtg-session-v2" ‖ mix_keys(qkd, kem_ss) ‖ transcript)
+session_key = SHA3-256("pqtg-session-v2" ‖ kem_ss ‖ transcript)
 ```
 
-Where `mix_keys(qkd, kem_ss)` is the SHA3-256-based hybrid combiner if a
-QKD key is available; otherwise reduces to `kem_ss` alone.
+v2 is PQC-only: the gateway never mixes a QKD key into a v2 session, since
+v2 cannot tell the client which ETSI 014 key to fetch. Hybrid mode needs v3
+(`PROTOCOL-V3-QKD-KEYID.md`).
 
 ---
 
@@ -49,7 +54,9 @@ QKD key is available; otherwise reduces to `kem_ss` alone.
 1. Generate ephemeral ML-KEM-768 keypair (ek, dk).        // throw away dk after handshake
 2. Generate Falcon-512 + SLH-DSA-Shake128f keypairs.       // long-lived per client
 3. Build ClientHello and send.
-4. Receive ServerHello.
+4. Receive ServerHello. Check ServerHello.version equals the version you
+   sent ("2.1", or "3.2" for v3). On mismatch → ABORT: an older gateway
+   runs the old session layer (see §2.1), which is not compatible.
 
 5. ▸ VK PINNING (issue #2 mitigation) ◂
    Compute: server_fp = SHA3-256("pqtg-identity-fingerprint-v1"
@@ -63,17 +70,73 @@ QKD key is available; otherwise reduces to `kem_ss` alone.
 
 7. Decapsulate kem_ciphertext with dk → kem_ss.
 
-8. Derive session_key. Establish AES-256-GCM with (key=session_key,
-   nonce = 4-byte zero prefix ‖ 8-byte u64 counter starting at 0).
+8. Derive session_key (§1 for v2; PROTOCOL-V3-QKD-KEYID.md §4 for v3).
+   It is NOT an AES key. Expand it into one AES-256-GCM key per
+   direction (docs/KEY-SCHEDULE.md §5):
 
-9. Send and receive length-prefixed encrypted frames per the session loop.
+     k_c2s = HMAC-SHA3-256(session_key, D[gateway/v2/key/c2s])
+     k_s2c = HMAC-SHA3-256(session_key, D[gateway/v2/key/s2c])
+
+   For "3.2" use D[gateway/v3/key/c2s] and D[gateway/v3/key/s2c].
+   The client seals with k_c2s and opens with k_s2c.
+   Nonce = 4 zero bytes ‖ 8-byte big-endian counter, one counter per
+   direction, each starting at 0.
+
+9. Send and receive length-prefixed encrypted frames per the session
+   loop (§2.1).
 ```
+
+`D[path]` is the 32-byte domain constant of `docs/KEY-SCHEDULE.md` §2; all of
+them are published in `tests/vectors/kdf-domains.json`, and
+`tests/vectors/gateway-session.json` gives both keys for known session keys
+of each version, so a client can be checked byte for byte.
 
 Steps 5 and 6 are independent and both required. Step 5 alone is not
 enough (an attacker who somehow obtained the legitimate Falcon vk could
 forge step 6); step 6 alone is not enough (the attacker can present
 their own legitimate-looking vk-and-signature pair and pass step 6 with
 no pin to compare against).
+
+### 2.1 Session loop (wire 2.1 and 3.2)
+
+Every session frame, in both directions:
+
+```
+[len: u32 BE][nonce(12) ‖ AES-256-GCM(k_dir, nonce, be32(len(data)) ‖ data ‖ falcon_sig(data))]
+```
+
+No associated data. `falcon_sig` is the sender's Falcon-512 signature over
+`data`: the client signs with its identity key, the gateway with its own.
+
+```
+Client, for each request:
+  1. data = bincode(KeyRequest { key_id, size, purpose })
+  2. Seal under k_c2s with nonce = 4 zero bytes ‖ be64(send_counter),
+     then send_counter += 1. Send the frame.
+  3. Read the response frame. Accept it only if its nonce is exactly
+     4 zero bytes ‖ be64(recv_counter). Open it under k_s2c; once it
+     authenticates, recv_counter += 1. Verify the signature under the
+     gateway's pinned Falcon vk. data = bincode(KeyResponse).
+  4. Anything else (another nonce, a failed tag, a bad signature):
+     close the connection and run a new handshake. Never skip ahead,
+     never accept an older counter, never retry under the same counter.
+```
+
+- Never seal two frames under the same key and counter. Neither counter
+  wraps: the value 2^64 - 1 is never used; reaching it (unreachable in
+  practice) means a new handshake.
+- TCP keeps order, so each end always knows the next counter to expect;
+  a frame with any other nonce is a replay, a reordering or an injection.
+- The gateway applies the same rules: it opens under k_c2s, only at its
+  next expected counter, so a replayed, reordered or reflected frame ends
+  the connection before any key is requested.
+
+Before wire 2.1 and 3.2, step 8 used `session_key` itself as the AES key
+in both directions, with both counters starting at 0, so a client's first
+request and the gateway's first response were sealed under the same key and
+nonce (AES-GCM nonce reuse), and frames were accepted at any nonce. Clients
+built on that rule must be updated; the gateway now refuses 2.0, 3.0 and 3.1
+hellos.
 
 ---
 
@@ -186,6 +249,9 @@ operator-fingerprint distribution above (signed manifest, HSM, DNS, etc.).
 | Client skips the fingerprint check (step 5).                            | Vulnerable to TOFU MITM (issue #2).|
 | Client skips the transcript-signature check (step 6).                   | Server identity not authenticated. |
 | Client reuses the ephemeral ML-KEM keypair across handshakes.           | Forward secrecy lost.              |
+| Client seals with `session_key` itself, or one key for both directions. | Nonce reuse against the gateway's frames; the gateway refuses the frame.|
+| Client accepts a response at any nonce, or not at the next counter.     | Replayed or reordered responses go undetected.|
+| Client sends "2.0" or "3.1" in its hello.                               | The gateway refuses the hello.     |
 | Client decodes `key` field without checking length matches `key_size/8`.| Vendor-side errors silently absorbed.|
 | Client trusts `qkd_enhanced: true` without separately verifying QKD.    | Hybrid-claim spoofing.             |
 | Client uses an RNG without an OS entropy source.                        | `client_random` predictability.    |
@@ -194,11 +260,13 @@ operator-fingerprint distribution above (signed manifest, HSM, DNS, etc.).
 
 ## 7. Versioning
 
-This document tracks PQTG `0.2.x`. Wire protocol bumps (e.g., to v3 for
-issue #8 generalization or issue #7 cookie-PoW) will produce a new
-`docs/CLIENT-INTEGRATION-v3.md`. The `version` field in `ClientHello`
-allows clients to negotiate; the server rejects unsupported versions
-in `proxy.rs::perform_handshake`.
+This document tracks wire `2.1` and the session layer it shares with `3.2`;
+the v3 handshake itself is specified in `PROTOCOL-V3-QKD-KEYID.md`. The
+`version` field in `ClientHello` selects the handshake, by exact match: the
+gateway accepts `"2.1"` and `"3.2"` only
+(`proxy.rs::handshake_for_version`) and refuses every other version at the
+hello, including `"2.0"`, `"3.0"` and `"3.1"`, whose session layer used one key
+for both directions.
 
 ---
 

@@ -1,13 +1,17 @@
 [package]
 name = "pq-transport-gateway"
-version = "2.0.0"
+version = "3.0.0"
 edition = "2021"
 authors = ["Paraxiom Technologies Inc. <security@paraxiom.org>"]
-description = "Post-Quantum secure proxy for QKD infrastructure (ETSI 014). Wire-incompatible with the broken 1.0.0; do not use 1.0.0."
+description = "Post-quantum secure proxy for QKD infrastructure (ETSI 014). 3.0.0 fixes AES-GCM nonce reuse in 2.0.0 and is wire-incompatible with 2.x; do not use 2.0.0 or 1.0.0."
 license = "GPL-3.0-only"
 keywords = ["quantum", "cryptography", "post-quantum", "qkd", "proxy"]
 categories = ["cryptography", "network-programming"]
 repository = "https://github.com/Paraxiom/pq-transport-gateway"
+# The 2026 whitepaper draft states claims this release does not support (a
+# theorem count, the MIT licence, SPHINCS+-256f signatures); it stays in the
+# repository but is not shipped in the crate.
+exclude = ["docs/pqtg_whitepaper_revised.*"]
 
 [workspace]
 # Standalone workspace to avoid parent conflicts
@@ -19,7 +23,11 @@ path = "src/lib.rs"
 [dependencies]
 # Post-quantum cryptography — Paraxiom unified API (pure-Rust PQC primitives)
 # Provides ML-KEM (FIPS 203), ML-DSA (FIPS 204), SLH-DSA (FIPS 205), Falcon
-paraxiom-pqc = { git = "https://github.com/Paraxiom/paraxiom-pqc.git" }
+# From crates.io. 0.2.0 clears secret keys and shared secrets on drop and
+# checks the Falcon degree against the key's label; fuzz/ inherits it through
+# the path dependency and kani/ names the same version. See
+# docs/THREAT-MODEL.md (A10).
+paraxiom-pqc = "0.2"
 
 # Transitive versions are resolved from the vendored ml-dsa/slh-dsa forks.
 
@@ -68,6 +76,9 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio-test = "0.4"
 httpmock = "0.7"
 criterion = { version = "0.5", features = ["html_reports"] }
+# Model-based tests of the session layer (tests/session_model.rs). Pure Rust;
+# the fork and timeout features are left out.
+proptest = { version = "1", default-features = false, features = ["std"] }
 
 [[bench]]
 name = "handshake"

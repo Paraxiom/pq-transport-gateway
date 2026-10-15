@@ -3,7 +3,9 @@
 //! Built on `paraxiom-pqc` (pure-Rust post-quantum primitives). Uses:
 //! - ML-KEM-768 (FIPS 203) for the actual key encapsulation / shared-secret derivation
 //! - Falcon-512 (pending FIPS 206) for compact handshake signatures
-//! - SLH-DSA-Shake128f (FIPS 205) for hash-based stateless signatures (audit trail)
+//! - SLH-DSA-Shake128f (FIPS 205): a second identity key, allow-listed with the
+//!   Falcon key; it signs nothing today (an audit-trail signing path exists but
+//!   is not wired to the audit log)
 //! - AES-256-GCM for the symmetric session
 //! - SHA3-256 for transcript hashing and key mixing
 //!
@@ -13,6 +15,9 @@
 //!    transcript with Falcon-512.
 //! 3. Client decapsulates ct with dk → same ss. Verifies server signature.
 //! 4. Both sides derive session_key = SHA3("pqtg-session-v2" || ss || transcript).
+//! 5. Since wire 2.1 (and 3.2 for the v3 handshake) the session key is not an
+//!    AES key: [`PqSession`] expands it into one AES-256-GCM key per direction
+//!    and accepts only the next expected frame (see [`PqSession`]).
 //!
 //! This replaces the v0.1 "compute_shared_secret" path which did NOT actually
 //! produce a shared secret (each side hashed its own pk + a probabilistic
@@ -26,6 +31,7 @@ use paraxiom_pqc::sign::{self, SignAlgorithm, Signature, SigningKey, Verificatio
 use rand::RngCore;
 use sha3::{Digest, Sha3_256};
 use std::path::Path;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const KEM_ALG: KemAlgorithm = KemAlgorithm::MlKem768;
 const SIG_ALG: SignAlgorithm = SignAlgorithm::Falcon512;
@@ -52,6 +58,13 @@ const KEY_MIXING_LABEL: &[u8] = b"pqtg-key-mixing-v2";
 
 /// Falcon-512 verification key length. Matches `lean/PQTGProofs/Falcon.lean::pk_size`.
 pub const FALCON_512_VK_LEN: usize = 897;
+
+/// Falcon-512 encoded secret key length and the first byte of each encoded
+/// key (`0x00 + logn`, `0x50 + logn`, logn = 9), as checked by
+/// `paraxiom-pqc` 0.2.0 against the `Falcon512` label.
+const FALCON_512_SK_LEN: usize = 1281;
+const FALCON_512_VK_HEADER: u8 = 0x09;
+const FALCON_512_SK_HEADER: u8 = 0x59;
 
 /// SLH-DSA-Shake128f verification key length. Matches `lean/PQTGProofs/Sphincs.lean::pk_size`.
 pub const SLH_DSA_SHAKE128F_VK_LEN: usize = 32;
@@ -136,10 +149,10 @@ impl PqKeyExchange {
         Ok(sig.bytes)
     }
 
-    /// Sign with the long-lived SLH-DSA key. Used for audit-log integrity
-    /// (issue #9 / threat-model T9). Currently called only by tests + the
-    /// audit subsystem; `#[allow(dead_code)]` because the bin's audit log
-    /// hasn't been wired through this path yet.
+    /// Sign with the long-lived SLH-DSA key. Meant for audit-log integrity
+    /// (issue #9, THREAT-MODEL S4/T9) but not wired: only tests and
+    /// `benches/audit.rs` call it, and the audit log is written unsigned.
+    /// `#[allow(dead_code)]` for that reason.
     #[allow(dead_code)]
     pub fn sign_hash_based(&self, msg: &[u8]) -> Result<Vec<u8>> {
         let sig = sign::sign(&self.hash_sk, msg).map_err(|e| anyhow!("SLH-DSA sign: {e:?}"))?;
@@ -158,9 +171,8 @@ impl PqKeyExchange {
         sign::verify(&vk, msg, &sig).map_err(|e| anyhow!("Falcon verify: {e:?}"))
     }
 
-    /// Verify an SLH-DSA signature. Used by audit-log readers (out-of-band
-    /// from the proxy itself). `#[allow(dead_code)]` because the bin
-    /// doesn't currently verify its own logs.
+    /// Verify an SLH-DSA signature, for a future audit-log reader. Nothing
+    /// outside tests and benches calls it, hence the `#[allow(dead_code)]`.
     #[allow(dead_code)]
     pub fn verify_slh_dsa(msg: &[u8], sig_bytes: &[u8], vk_bytes: &[u8]) -> Result<bool> {
         let vk = VerificationKey {
@@ -208,8 +220,8 @@ impl EphemeralKemKey {
     ///
     /// Reusing an ephemeral key does not compile:
     ///
-    /// ```compile_fail
-    /// use pq_transport_gateway::EphemeralKemKey;
+    /// ```compile_fail,E0382
+    /// use pq_qkd_proxy::EphemeralKemKey;
     /// let key = EphemeralKemKey::new().unwrap();
     /// let ct = [0u8; 1088];
     /// let _ = key.decapsulate(&ct); // consumes the single-use key
@@ -444,11 +456,100 @@ pub fn random_bytes<const N: usize>() -> [u8; N] {
     bytes
 }
 
-/// Authenticated session: AES-256-GCM with a counter-based nonce.
+/// Which end of a gateway session this is. Each direction has its own key, so
+/// the end decides which key seals and which opens: the client seals with the
+/// client-to-server key and opens with the server-to-client key, the server
+/// the reverse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// Constructed by clients through the library; the gateway binary is
+    /// always the server end, hence the bin-side allow.
+    #[allow(dead_code)]
+    Client,
+    Server,
+}
+
+/// The handshake whose session key a [`PqSession`] expands: the v2 schedule
+/// (`derive_session_key`, wire `2.1`) or the v3 keyed chain
+/// (`derive_v3_session_key`, wire `3.2`). Each has its own pair of direction
+/// domains, so the two schedules never yield the same record key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandshakeVersion {
+    V2,
+    V3,
+}
+
+/// The two record keys of a gateway session, one per direction. Zeroized on
+/// drop.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct DirectionKeys {
+    /// Seals what the client sends; the server opens with it.
+    pub c2s: [u8; 32],
+    /// Seals what the server sends; the client opens with it.
+    pub s2c: [u8; 32],
+}
+
+/// Expand a handshake's session key into the two record keys
+/// (docs/KEY-SCHEDULE.md §5):
+///
+/// ```text
+/// k_c2s = HMAC-SHA3-256(session_key, D[gateway/vN/key/c2s])
+/// k_s2c = HMAC-SHA3-256(session_key, D[gateway/vN/key/s2c])
+/// ```
+///
+/// with N = 3 for wire `3.2` and N = 2 for wire `2.1`. The session key already
+/// binds the KEM secret, the transcript and (v3 Hybrid) the QKD key, so no
+/// further input is needed; the two outputs are independent PRF values under
+/// distinct domains. [`PqSession::new`] calls this; it is public so the
+/// published vectors (`tests/vectors/gateway-session.json`) can pin it.
+pub fn derive_direction_keys(session_key: &[u8; 32], version: HandshakeVersion) -> DirectionKeys {
+    use crate::kdf;
+    let (c2s, s2c) = match version {
+        HandshakeVersion::V2 => (&kdf::GATEWAY_V2_KEY_C2S, &kdf::GATEWAY_V2_KEY_S2C),
+        HandshakeVersion::V3 => (&kdf::GATEWAY_V3_KEY_C2S, &kdf::GATEWAY_V3_KEY_S2C),
+    };
+    DirectionKeys {
+        c2s: kdf::prf(session_key, c2s, &[]),
+        s2c: kdf::prf(session_key, s2c, &[]),
+    }
+}
+
+/// The nonce of the frame at position `counter` in one direction: four zero
+/// bytes, then the counter as a big-endian u64. Each direction counts from 0
+/// under its own key.
+pub fn session_nonce(counter: u64) -> [u8; 12] {
+    let mut nonce = [0u8; 12];
+    nonce[4..].copy_from_slice(&counter.to_be_bytes());
+    nonce
+}
+
+/// An established gateway session (wire `2.1` and `3.2`): AES-256-GCM with
+/// one key and one counter per direction, and strict receive sequencing.
+///
+/// - Each end seals with its own sending key and opens with the peer's
+///   ([`Role`], [`derive_direction_keys`]). The two directions therefore never
+///   share a (key, nonce) pair, and a frame reflected back to its sender does
+///   not authenticate. Until wire 2.1 / 3.2 a single key served both
+///   directions with both counters starting at 0, so a client's first request
+///   and the server's first response were sealed under the same key and
+///   nonce (AES-GCM nonce reuse).
+/// - The nonce of the n-th frame in a direction is [`session_nonce`]`(n)`.
+///   Neither counter wraps: exhaustion is an error on both sides.
+/// - A frame is accepted only if its nonce is exactly the next one expected.
+///   TCP delivers in order, so a replayed, reordered or dropped frame is
+///   refused before decryption, and the receive counter moves only when a
+///   frame authenticates, so a refused frame leaves the session where it was.
 pub struct PqSession {
-    cipher: Aes256Gcm,
+    /// Seals what this end sends.
+    send: Aes256Gcm,
+    /// Opens what this end receives.
+    recv: Aes256Gcm,
+    role: Role,
     pub session_id: [u8; 32],
-    nonce_counter: u64,
+    /// Counter of the next frame this end seals.
+    send_counter: u64,
+    /// Counter the next frame this end accepts must carry.
+    recv_counter: u64,
     /// Falcon verification key of the remote party, for verifying signed
     /// payloads inside the encrypted channel.
     pub remote_falcon_pk: Vec<u8>,
@@ -464,17 +565,22 @@ impl std::fmt::Debug for PqSession {
                     self.session_id[0], self.session_id[1], self.session_id[2], self.session_id[3]
                 ),
             )
-            .field("nonce_counter", &self.nonce_counter)
+            .field("role", &self.role)
+            .field("send_counter", &self.send_counter)
+            .field("recv_counter", &self.recv_counter)
             .field("remote_falcon_pk_len", &self.remote_falcon_pk.len())
             .finish()
     }
 }
 
 impl PqSession {
-    /// Construct a session. Validates `remote_falcon_pk` length up-front
-    /// so a malformed vk fails here rather than at first verify call.
+    /// Construct one end of a session from the handshake's session key.
+    /// Validates `remote_falcon_pk` length up-front so a malformed vk fails
+    /// here rather than at first verify call.
     pub fn new(
         session_key: &[u8; 32],
+        version: HandshakeVersion,
+        role: Role,
         session_id: [u8; 32],
         remote_falcon_pk: Vec<u8>,
     ) -> Result<Self> {
@@ -485,36 +591,68 @@ impl PqSession {
                 remote_falcon_pk.len()
             ));
         }
-        let key = Key::<Aes256Gcm>::from_slice(session_key);
-        let cipher = Aes256Gcm::new(key);
+        let keys = derive_direction_keys(session_key, version);
+        let (send_key, recv_key) = match role {
+            Role::Client => (&keys.c2s, &keys.s2c),
+            Role::Server => (&keys.s2c, &keys.c2s),
+        };
         Ok(Self {
-            cipher,
+            send: Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(send_key)),
+            recv: Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(recv_key)),
+            role,
             session_id,
-            nonce_counter: 0,
+            send_counter: 0,
+            recv_counter: 0,
             remote_falcon_pk,
         })
     }
 
+    /// Which end of the session this is. Library API for clients and tests;
+    /// the binary does not read it, hence the bin-side allow.
+    #[allow(dead_code)]
+    pub fn role(&self) -> Role {
+        self.role
+    }
+
+    /// Seal one frame in this end's sending direction; returns the ciphertext
+    /// and the nonce it used. The counter advances only when a frame is
+    /// produced, so the peer sees no gap, and the last counter value is never
+    /// used: exhaustion is an error, not a wrap.
     pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<(Vec<u8>, [u8; 12])> {
-        let mut nonce_bytes = [0u8; 12];
-        nonce_bytes[4..].copy_from_slice(&self.nonce_counter.to_be_bytes());
-        self.nonce_counter = self
-            .nonce_counter
+        let nonce_bytes = session_nonce(self.send_counter);
+        let next = self
+            .send_counter
             .checked_add(1)
-            .ok_or_else(|| anyhow!("Nonce counter exhausted; rotate session"))?;
-        let nonce = Nonce::from_slice(&nonce_bytes);
+            .ok_or_else(|| anyhow!("Send counter exhausted; re-establish the session"))?;
         let ciphertext = self
-            .cipher
-            .encrypt(nonce, plaintext)
+            .send
+            .encrypt(Nonce::from_slice(&nonce_bytes), plaintext)
             .map_err(|_| anyhow!("Encryption failed"))?;
+        self.send_counter = next;
         Ok((ciphertext, nonce_bytes))
     }
 
-    pub fn decrypt(&self, ciphertext: &[u8], nonce: &[u8; 12]) -> Result<Vec<u8>> {
-        let nonce = Nonce::from_slice(nonce);
-        self.cipher
-            .decrypt(nonce, ciphertext)
-            .map_err(|_| anyhow!("Decryption failed"))
+    /// Open one frame from the peer. Refuses, before decrypting, any nonce
+    /// other than the next expected one (replay, reordering, a dropped frame).
+    /// A frame this end sealed itself fails authentication here, being under
+    /// the other direction's key. The receive counter advances only when the
+    /// frame authenticates, and never wraps.
+    pub fn decrypt(&mut self, ciphertext: &[u8], nonce: &[u8; 12]) -> Result<Vec<u8>> {
+        if *nonce != session_nonce(self.recv_counter) {
+            return Err(anyhow!(
+                "Session frame out of sequence: replay or reordering rejected"
+            ));
+        }
+        let next = self
+            .recv_counter
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("Receive counter exhausted; re-establish the session"))?;
+        let plaintext = self
+            .recv
+            .decrypt(Nonce::from_slice(nonce), ciphertext)
+            .map_err(|_| anyhow!("Decryption failed"))?;
+        self.recv_counter = next;
+        Ok(plaintext)
     }
 
     /// Sign with Falcon, then encrypt. Wire format: nonce(12) || E(len(4) || data || sig)
@@ -531,7 +669,11 @@ impl PqSession {
         Ok(out)
     }
 
-    pub fn decrypt_and_verify(&self, encrypted: &[u8]) -> Result<Vec<u8>> {
+    /// Open a frame from [`Self::sign_and_encrypt`] and verify the peer's
+    /// Falcon signature inside it. Sequencing and direction are enforced by
+    /// [`Self::decrypt`]; a bad inner signature is an error the caller must
+    /// treat as fatal for the session.
+    pub fn decrypt_and_verify(&mut self, encrypted: &[u8]) -> Result<Vec<u8>> {
         if encrypted.len() < 12 {
             return Err(anyhow!("Invalid encrypted data: too short"));
         }
@@ -636,9 +778,7 @@ fn read_keypair(
     let alg = algo_from_tag(tag)?;
     if alg != expected_alg {
         return Err(anyhow!(
-            "Identity algorithm mismatch: expected {:?}, got {:?}",
-            expected_alg,
-            alg
+            "Identity algorithm mismatch: expected {expected_alg:?}, got {alg:?}"
         ));
     }
     let sk_bytes = read_length_prefixed(buf, cursor)?;
@@ -737,6 +877,29 @@ impl PqKeyExchange {
                 HASH_ALG
             ));
         }
+        if sig_vk.algorithm != SIG_ALG || hash_vk.algorithm != HASH_ALG {
+            return Err(anyhow!(
+                "Identity verification key algorithms ({:?}, {:?}) do not match expected ({:?}, {:?})",
+                sig_vk.algorithm,
+                hash_vk.algorithm,
+                SIG_ALG,
+                HASH_ALG
+            ));
+        }
+        // `paraxiom-pqc` 0.2.0 refuses to sign with a Falcon key whose header
+        // or length does not match its label. Check here so that a corrupt or
+        // mislabelled identity fails when it is loaded, not at the first
+        // handshake.
+        if sig_sk.bytes.len() != FALCON_512_SK_LEN || sig_sk.bytes[0] != FALCON_512_SK_HEADER {
+            return Err(anyhow!(
+                "Identity Falcon-512 secret key is malformed (expected {FALCON_512_SK_LEN} bytes with header 0x{FALCON_512_SK_HEADER:02X})"
+            ));
+        }
+        if sig_vk.bytes.len() != FALCON_512_VK_LEN || sig_vk.bytes[0] != FALCON_512_VK_HEADER {
+            return Err(anyhow!(
+                "Identity Falcon-512 public key is malformed (expected {FALCON_512_VK_LEN} bytes with header 0x{FALCON_512_VK_HEADER:02X})"
+            ));
+        }
         Ok(Self {
             sig_sk,
             sig_vk,
@@ -768,9 +931,7 @@ impl PqKeyExchange {
         let version = buf[4];
         if version != IDENTITY_FORMAT_VERSION {
             return Err(anyhow!(
-                "Unsupported identity format version: {} (expected {})",
-                version,
-                IDENTITY_FORMAT_VERSION
+                "Unsupported identity format version: {version} (expected {IDENTITY_FORMAT_VERSION})"
             ));
         }
         let mut cursor = 5;
@@ -933,30 +1094,169 @@ mod tests {
         assert!(!bad);
     }
 
-    #[test]
-    fn pq_session_encryption_roundtrip() {
+    /// Both ends of one session from the same session key, as a completed
+    /// handshake leaves them. The Falcon vks are only length-checked here.
+    fn session_pair(version: HandshakeVersion) -> (PqSession, PqSession) {
         let key = random_bytes::<32>();
         let id = random_bytes::<32>();
-        let server = PqKeyExchange::new().unwrap();
-        let mut session = PqSession::new(&key, id, server.falcon_pk_bytes().to_vec()).unwrap();
-        let plaintext = b"Quantum-safe message";
-        let (ciphertext, nonce) = session.encrypt(plaintext).unwrap();
-        let decrypted = session.decrypt(&ciphertext, &nonce).unwrap();
-        assert_eq!(decrypted, plaintext);
+        let vk = vec![0u8; FALCON_512_VK_LEN];
+        let client = PqSession::new(&key, version, Role::Client, id, vk.clone()).unwrap();
+        let server = PqSession::new(&key, version, Role::Server, id, vk).unwrap();
+        (client, server)
+    }
+
+    #[test]
+    fn pq_session_encryption_roundtrip() {
+        for version in [HandshakeVersion::V2, HandshakeVersion::V3] {
+            let (mut client, mut server) = session_pair(version);
+            let (ct, nonce) = client.encrypt(b"request").unwrap();
+            assert_eq!(server.decrypt(&ct, &nonce).unwrap(), b"request");
+            let (ct, nonce) = server.encrypt(b"response").unwrap();
+            assert_eq!(client.decrypt(&ct, &nonce).unwrap(), b"response");
+        }
     }
 
     /// Counter-based nonce: encrypting the same plaintext twice must produce
-    /// distinct ciphertexts (i.e., distinct nonces under the hood).
+    /// distinct nonces, `session_nonce(0)` then `session_nonce(1)`.
     #[test]
     fn nonce_counter_advances_per_message() {
-        let key = random_bytes::<32>();
-        let id = random_bytes::<32>();
-        let server = PqKeyExchange::new().unwrap();
-        let mut session = PqSession::new(&key, id, server.falcon_pk_bytes().to_vec()).unwrap();
+        let (mut client, _server) = session_pair(HandshakeVersion::V3);
         let plaintext = b"same message";
-        let (_, nonce_a) = session.encrypt(plaintext).unwrap();
-        let (_, nonce_b) = session.encrypt(plaintext).unwrap();
+        let (ct_a, nonce_a) = client.encrypt(plaintext).unwrap();
+        let (ct_b, nonce_b) = client.encrypt(plaintext).unwrap();
+        assert_eq!(nonce_a, session_nonce(0));
+        assert_eq!(nonce_b, session_nonce(1));
         assert_ne!(nonce_a, nonce_b, "nonces must not repeat under same key");
+        assert_ne!(ct_a, ct_b);
+    }
+
+    /// The defect fixed in wire 2.1 / 3.2. Both ends start at counter 0, so
+    /// their first frames carry the same nonce; with one key for both
+    /// directions an identical plaintext gave an identical ciphertext (AES-GCM
+    /// nonce reuse). Now each end seals under its own direction key, so the
+    /// (key, nonce) pairs differ and so do the ciphertexts.
+    #[test]
+    fn client_and_server_first_frames_never_share_a_key_and_nonce() {
+        for version in [HandshakeVersion::V2, HandshakeVersion::V3] {
+            let (mut client, mut server) = session_pair(version);
+            let same = b"identical first frame from each end";
+            let (client_ct, client_nonce) = client.encrypt(same).unwrap();
+            let (server_ct, server_nonce) = server.encrypt(same).unwrap();
+            assert_eq!(client_nonce, server_nonce, "both directions start at 0");
+            assert_ne!(
+                client_ct, server_ct,
+                "same nonce and plaintext: the ciphertexts differ only because the keys do"
+            );
+            // And each still opens at the other end.
+            assert_eq!(server.decrypt(&client_ct, &client_nonce).unwrap(), same);
+            assert_eq!(client.decrypt(&server_ct, &server_nonce).unwrap(), same);
+        }
+    }
+
+    #[test]
+    fn direction_keys_are_distinct_per_direction_and_per_version() {
+        let secret = [0x42u8; 32];
+        let v2 = derive_direction_keys(&secret, HandshakeVersion::V2);
+        let v3 = derive_direction_keys(&secret, HandshakeVersion::V3);
+        assert_ne!(v3.c2s, v3.s2c);
+        assert_ne!(v2.c2s, v2.s2c);
+        assert_ne!(v2.c2s, v3.c2s, "a v2 and a v3 session never share a key");
+        assert_ne!(v2.s2c, v3.s2c);
+        assert_ne!(v3.c2s, secret, "the session key itself is never an AES key");
+        assert_eq!(
+            v3.c2s,
+            derive_direction_keys(&secret, HandshakeVersion::V3).c2s,
+            "deterministic"
+        );
+    }
+
+    /// Reflection: a frame sent back to the end that sealed it, at the very
+    /// counter that end expects next, so only the key separation can refuse
+    /// it. And the refusal must not move the receive counter.
+    #[test]
+    fn a_frame_reflected_to_its_sender_is_rejected() {
+        let (mut client, mut server) = session_pair(HandshakeVersion::V3);
+
+        // Server's first frame, fed back to the server (it expects counter 0).
+        let (ct, nonce) = server.encrypt(b"response").unwrap();
+        let err = server.decrypt(&ct, &nonce).unwrap_err();
+        assert!(err.to_string().contains("Decryption failed"), "got: {err}");
+
+        // Client's first frame, fed back to the client.
+        let (req, req_nonce) = client.encrypt(b"request").unwrap();
+        assert!(client.decrypt(&req, &req_nonce).is_err());
+
+        // Neither refusal moved anything: the genuine frames still open.
+        assert_eq!(server.decrypt(&req, &req_nonce).unwrap(), b"request");
+        assert_eq!(client.decrypt(&ct, &nonce).unwrap(), b"response");
+    }
+
+    #[test]
+    fn a_replayed_frame_is_rejected_and_the_stream_survives() {
+        let (mut client, mut server) = session_pair(HandshakeVersion::V2);
+        let (first, n0) = client.encrypt(b"one").unwrap();
+        let (second, n1) = client.encrypt(b"two").unwrap();
+
+        assert_eq!(server.decrypt(&first, &n0).unwrap(), b"one");
+        let err = server.decrypt(&first, &n0).unwrap_err();
+        assert!(err.to_string().contains("out of sequence"), "got: {err}");
+        assert_eq!(
+            server.decrypt(&second, &n1).unwrap(),
+            b"two",
+            "a refused replay must not break the legitimate stream"
+        );
+    }
+
+    #[test]
+    fn an_out_of_order_frame_is_rejected_and_the_stream_survives() {
+        let (mut client, mut server) = session_pair(HandshakeVersion::V3);
+        let (first, n0) = client.encrypt(b"one").unwrap();
+        let (second, n1) = client.encrypt(b"two").unwrap();
+
+        let err = server.decrypt(&second, &n1).unwrap_err();
+        assert!(err.to_string().contains("out of sequence"), "got: {err}");
+        assert_eq!(server.decrypt(&first, &n0).unwrap(), b"one");
+        assert_eq!(server.decrypt(&second, &n1).unwrap(), b"two");
+    }
+
+    /// A frame whose nonce names the right counter but under a forged
+    /// prefix, or a tampered ciphertext, is refused and moves nothing.
+    #[test]
+    fn a_forged_nonce_or_tampered_frame_is_rejected() {
+        let (mut client, mut server) = session_pair(HandshakeVersion::V3);
+        let (ct, nonce) = client.encrypt(b"one").unwrap();
+
+        let mut forged = nonce;
+        forged[0] = 0x01;
+        assert!(server.decrypt(&ct, &forged).is_err());
+
+        let mut tampered = ct.clone();
+        tampered[0] ^= 0x01;
+        assert!(server.decrypt(&tampered, &nonce).is_err());
+
+        assert_eq!(server.decrypt(&ct, &nonce).unwrap(), b"one");
+    }
+
+    /// Neither direction wraps: the last counter value is never used to seal,
+    /// and a receiver at that value refuses rather than wrapping to 0.
+    #[test]
+    fn both_counters_refuse_to_wrap() {
+        let (mut client, mut server) = session_pair(HandshakeVersion::V3);
+
+        client.send_counter = u64::MAX;
+        let err = client.encrypt(b"one too many").unwrap_err();
+        assert!(err.to_string().contains("exhausted"), "got: {err}");
+        assert_eq!(client.send_counter, u64::MAX, "nothing was sealed");
+
+        client.send_counter = u64::MAX - 1;
+        let (ct, nonce) = client.encrypt(b"last").unwrap();
+        server.recv_counter = u64::MAX - 1;
+        assert_eq!(server.decrypt(&ct, &nonce).unwrap(), b"last");
+        assert_eq!(server.recv_counter, u64::MAX);
+        let err = server
+            .decrypt(b"anything", &session_nonce(u64::MAX))
+            .unwrap_err();
+        assert!(err.to_string().contains("exhausted"), "got: {err}");
     }
 
     #[test]
@@ -980,20 +1280,46 @@ mod tests {
         let session_key = derive_session_key(&client_ss, &transcript);
         assert_eq!(session_key, derive_session_key(&server_ss, &transcript));
 
-        // Server-side session encrypts + signs.
+        // Server end: holds the client's Falcon vk to verify requests.
+        let client_identity = PqKeyExchange::new().unwrap();
         let session_id = random_bytes::<32>();
-        let mut server_session =
-            PqSession::new(&session_key, session_id, server.falcon_pk_bytes().to_vec()).unwrap();
+        let mut server_session = PqSession::new(
+            &session_key,
+            HandshakeVersion::V2,
+            Role::Server,
+            session_id,
+            client_identity.falcon_pk_bytes().to_vec(),
+        )
+        .unwrap();
+        // Client end: holds the server's Falcon vk to verify responses.
+        let mut client_session = PqSession::new(
+            &session_key,
+            HandshakeVersion::V2,
+            Role::Client,
+            session_id,
+            server.falcon_pk_bytes().to_vec(),
+        )
+        .unwrap();
+
+        let request = b"key request";
+        let wire = client_session
+            .sign_and_encrypt(request, client_identity.falcon_signing_key())
+            .unwrap();
+        assert_eq!(server_session.decrypt_and_verify(&wire).unwrap(), request);
+
         let payload = b"key request response";
         let wire = server_session
             .sign_and_encrypt(payload, server.falcon_signing_key())
             .unwrap();
-
-        // Client-side session has same key, holds server's Falcon vk for verify.
-        let client_session =
-            PqSession::new(&session_key, session_id, server.falcon_pk_bytes().to_vec()).unwrap();
         let recovered = client_session.decrypt_and_verify(&wire).unwrap();
         assert_eq!(recovered, payload);
+
+        // A response signed by anyone but the server is refused even though it
+        // is sealed under the right key at the right counter.
+        let forged = server_session
+            .sign_and_encrypt(b"forged", client_identity.falcon_signing_key())
+            .unwrap();
+        assert!(client_session.decrypt_and_verify(&forged).is_err());
     }
 
     #[test]
@@ -1295,13 +1621,109 @@ mod tests {
 
     #[test]
     fn pq_session_rejects_short_falcon_vk() {
-        let err = PqSession::new(&[0u8; 32], [0u8; 32], vec![0u8; 100]).unwrap_err();
+        let err = PqSession::new(
+            &[0u8; 32],
+            HandshakeVersion::V3,
+            Role::Server,
+            [0u8; 32],
+            vec![0u8; 100],
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("Falcon-512 vk wrong size"));
     }
 
     #[test]
     fn pq_session_accepts_correct_falcon_vk() {
-        let ok = PqSession::new(&[0u8; 32], [0u8; 32], vec![0u8; FALCON_512_VK_LEN]);
+        let ok = PqSession::new(
+            &[0u8; 32],
+            HandshakeVersion::V3,
+            Role::Client,
+            [0u8; 32],
+            vec![0u8; FALCON_512_VK_LEN],
+        );
         assert!(ok.is_ok());
+        assert_eq!(ok.unwrap().role(), Role::Client);
+    }
+
+    /// `paraxiom-pqc` 0.2.0 checks that a Falcon key's header and length match
+    /// the degree its label names, and refuses to sign or verify otherwise.
+    /// The gateway labels every Falcon key `Falcon512`, so the keys it
+    /// generates must carry the Falcon-512 headers (public 0x09, secret 0x59).
+    #[test]
+    fn generated_falcon_keys_carry_the_falcon_512_header() {
+        let id = PqKeyExchange::new().unwrap();
+        let vk = id.falcon_pk_bytes();
+        assert_eq!(vk.len(), FALCON_512_VK_LEN);
+        assert_eq!(vk[0], 0x09, "Falcon-512 public key header");
+        assert_eq!(id.sig_sk.bytes.len(), 1281);
+        assert_eq!(id.sig_sk.bytes[0], 0x59, "Falcon-512 secret key header");
+
+        let restored = PqKeyExchange::decode(&id.encode().unwrap()).unwrap();
+        assert_eq!(restored.sig_sk.algorithm, SignAlgorithm::Falcon512);
+        assert_eq!(restored.sig_sk.bytes[0], 0x59);
+    }
+
+    /// A key of another degree, given where the gateway expects Falcon-512,
+    /// never verifies. Before `paraxiom-pqc` 0.2.0, a Falcon-1024 key and
+    /// signature passed under the Falcon-512 label were accepted.
+    #[test]
+    fn verify_falcon_refuses_keys_of_another_degree() {
+        let msg = b"degree check";
+        let id = PqKeyExchange::new().unwrap();
+        let sig = id.sign_transcript(msg).unwrap();
+        assert!(PqKeyExchange::verify_falcon(msg, &sig, id.falcon_pk_bytes()).unwrap());
+
+        // Right length, Falcon-1024 header byte.
+        let mut relabelled = id.falcon_pk_bytes().to_vec();
+        relabelled[0] = 0x0A;
+        assert!(!matches!(
+            PqKeyExchange::verify_falcon(msg, &sig, &relabelled),
+            Ok(true)
+        ));
+
+        // A real Falcon-1024 key and signature.
+        let kp = sign::keypair(SignAlgorithm::Falcon1024).unwrap();
+        let sig_1024 = sign::sign(&kp.sk, msg).unwrap();
+        assert!(!matches!(
+            PqKeyExchange::verify_falcon(msg, &sig_1024.bytes, &kp.vk.bytes),
+            Ok(true)
+        ));
+    }
+
+    /// A stored identity whose Falcon key carries the wrong header is refused
+    /// when it is loaded. Layout: magic (4) + version (1) + algo tag (1) +
+    /// length (4), then the secret key; its public key follows after another
+    /// 4-byte length.
+    #[test]
+    fn decode_refuses_a_falcon_key_with_the_wrong_header() {
+        let encoded = PqKeyExchange::new().unwrap().encode().unwrap();
+        let sk_at = 4 + 1 + 1 + 4;
+        assert_eq!(encoded[sk_at], 0x59);
+        let vk_at = sk_at + 1281 + 4;
+        assert_eq!(encoded[vk_at], 0x09);
+
+        let mut bad_sk = encoded.clone();
+        bad_sk[sk_at] = 0x5A;
+        let err = PqKeyExchange::decode(&bad_sk).unwrap_err();
+        assert!(err.to_string().contains("secret key is malformed"), "{err}");
+
+        let mut bad_vk = encoded;
+        bad_vk[vk_at] = 0x0A;
+        let err = PqKeyExchange::decode(&bad_vk).unwrap_err();
+        assert!(err.to_string().contains("public key is malformed"), "{err}");
+    }
+
+    /// Keys of the right algorithm but the wrong length are refused too.
+    #[test]
+    fn from_signing_keys_refuses_a_short_falcon_secret_key() {
+        let falcon = sign::keypair(SIG_ALG).unwrap();
+        let slh = sign::keypair(HASH_ALG).unwrap();
+        let short = SigningKey {
+            algorithm: SIG_ALG,
+            bytes: falcon.sk.bytes[..1280].to_vec(),
+        };
+        let err =
+            PqKeyExchange::from_signing_keys(short, falcon.vk.clone(), slh.sk, slh.vk).unwrap_err();
+        assert!(err.to_string().contains("secret key is malformed"), "{err}");
     }
 }

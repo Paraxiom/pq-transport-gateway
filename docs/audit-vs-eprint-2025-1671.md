@@ -22,6 +22,6 @@
 - One-time key delivery (remove-on-delivery), abort-on-missing-kID, peer-pairing enforcement at retrieval, unique kIDs, party IDs in every MAC input, one-protocol-per-key (cross-protocol kID replay).
 
 ## Talking line (Toshiba call / QCrypt), honest as of today
-"We audited PQTG this week against the dependent-key model in eprint 2025/1671: the concrete attack doesn't apply — we have no XOR combining and sessions are transcript-bound — and we're implementing the key-ID transcript binding their model calls for; it was already in our v3 protocol design." (Upgrade to past tense once v3 ships.)
+"We checked PQTG internally this week against the dependent-key model in eprint 2025/1671 (a self-check, not an external audit): the concrete attack doesn't apply — we have no XOR combining and sessions are transcript-bound — and we're implementing the key-ID transcript binding their model calls for; it was already in our v3 protocol design." (Upgrade to past tense once v3 ships.)
 
 *Full agent evidence: session 715f1d24, workflow wf_2b55e6d3-98d journal.*

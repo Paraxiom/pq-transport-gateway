@@ -1,0 +1,73 @@
+──────────────────────────────────────────────────
+  ◆ Verifpal 1.4.10 · https://verifpal.com
+──────────────────────────────────────────────────
+
+[2K  phase 0 · Client · running · 0/8 queries resolved · 0ms
+[2K
+[2K  phase 0 · Client · running · 0/8 queries resolved · 0ms
+[2K
+[2K  phase 0 · Client#2 · targeted search, 2 states checked · 6/8 queries resolved · 80ms
+[2K     Info ● Verdicts were unchanged from 2 sessions through 3; analyzing at 3.
+ Verifpal ◆ Verification initiated for 'pqtg-gateway-session-onekey.vp' at 06:13:58 AM.
+     Info ● Analyzing 3 parallel sessions per principal; per-session values and principals are suffixed #2 through #3.
+     Info ● Attacker is configured as active.
+     Info ● Running at phase 0.
+     Fail ✗ confidentiality? req0 (Analysis 1)
+     Fail ✗ confidentiality? req1 (Analysis 1)
+     Fail ✗ confidentiality? resp0 (Analysis 1)
+     Fail ✗ confidentiality? resp1 (Analysis 1)
+     Fail ✗ authentication? Server -> Client: a0 (Analysis 7)
+     Fail ✗ authentication? Server -> Client: a1 (Analysis 8)
+
+──────────────────────────────────────────────────
+ Verifpal ◆ Verification completed for 'pqtg-gateway-session-onekey.vp' at 06:13:58 AM in 83ms.
+
+     Fail ✗ confidentiality? req0
+            ╭─ Attack trace:
+            │ 1. Attacker observes q0 on the wire.
+            │ 2. Attacker observes a0 on the wire.
+            │ 3. Attacker recovers req0 from q0: a0 shares its key and nonce.
+            ╰▸ req0 (req0) is obtained by Attacker.
+     Fail ✗ confidentiality? req1
+            ╭─ Attack trace:
+            │ 1. Attacker observes q1 on the wire.
+            │ 2. Attacker observes a1 on the wire.
+            │ 3. Attacker recovers req1 from q1: a1 shares its key and nonce.
+            ╰▸ req1 (req1) is obtained by Attacker.
+     Fail ✗ confidentiality? resp0
+            ╭─ Attack trace:
+            │ 1. Attacker observes a0 on the wire.
+            │ 2. Attacker observes q0 on the wire.
+            │ 3. Attacker recovers resp0 from a0: q0 shares its key and nonce.
+            ╰▸ resp0 (resp0) is obtained by Attacker.
+     Fail ✗ confidentiality? resp1
+            ╭─ Attack trace:
+            │ 1. Attacker observes a1 on the wire.
+            │ 2. Attacker observes q1 on the wire.
+            │ 3. Attacker recovers resp1 from a1: q1 shares its key and nonce.
+            ╰▸ resp1 (resp1) is obtained by Attacker.
+     Pass ✓ authentication? Client -> Server: q0  [search exhausted at 3 sessions]
+     Pass ✓ authentication? Client -> Server: q1  [search exhausted at 3 sessions]
+     Fail ✗ authentication? Server -> Client: a0
+            ╭─ Attack trace:
+            │ 1. Attacker observes q0 on the wire.
+            │ 2. Attacker observes AEAD_ENC(sk_s, n0, resp0, nil) on the wire.
+            │ 3. Attacker forges AEAD_ENC(sk_s, n0, nil, nil) under the key and nonce shared by q0 and AEAD_ENC(sk_s, n0, resp0, nil), using nil, nil.
+            │ 4. Attacker replaces a0 (sent by Server to Client) with AEAD_ENC(sk_s, n0, nil, nil). (a0 was AEAD_ENC(sk_s, n0, resp0, nil))
+            │ 5. Client's AEAD_DEC(sk_c, n0, AEAD_ENC(sk_s, n0, nil, nil), nil)? passes — the attacker controls one of its inputs.
+            │ 6. Attacker observes ct on the wire.
+            ╰▸ a0 (AEAD_ENC(sk_s, n0, nil, nil)), sent by Attacker and not by Server, is successfully used in AEAD_DEC(sk_c, n0, a0, nil)? within Client's state.
+     Fail ✗ authentication? Server -> Client: a1
+            ╭─ Attack trace:
+            │ 1. Attacker observes q1 on the wire.
+            │ 2. Attacker observes AEAD_ENC(sk_s, n1, resp1, nil) on the wire.
+            │ 3. Attacker forges AEAD_ENC(sk_s, n1, nil, nil) under the key and nonce shared by q1 and AEAD_ENC(sk_s, n1, resp1, nil), using nil, nil.
+            │ 4. Attacker replaces a1 (sent by Server to Client) with AEAD_ENC(sk_s, n1, nil, nil). (a1 was AEAD_ENC(sk_s, n1, resp1, nil))
+            │ 5. Client's AEAD_DEC(sk_c, n1, AEAD_ENC(sk_s, n1, nil, nil), nil)? passes — the attacker controls one of its inputs.
+            │ 6. Attacker observes ct on the wire.
+            ╰▸ a1 (AEAD_ENC(sk_s, n1, nil, nil)), sent by Attacker and not by Server, is successfully used in AEAD_DEC(sk_c, n1, a1, nil)? within Client's state.
+
+──────────────────────────────────────────────────
+     Fail ✗ 6 of 8 queries failed.
+ Verifpal ◆ Thank you for using Verifpal.
+  Update ▲ Verifpal 1.6.6 is available; you have 1.4.10. Get it at https://verifpal.com/

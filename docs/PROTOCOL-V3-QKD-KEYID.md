@@ -1,6 +1,6 @@
 # PQTG Wire Protocol v3 — QKD key-id distribution (design sketch)
 
-Status: **IMPLEMENTED** (2026-08-18, branch feat/protocol-v3-keyid; audited against eprint 2025/1671 — see audit-vs-eprint-2025-1671.md). Originally authored from the
+Status: **IMPLEMENTED** (2026-08-18, branch feat/protocol-v3-keyid; checked internally against the eprint 2025/1671 model — see audit-vs-eprint-2025-1671.md). Originally authored from the
 KirQ Site-101 deployment, 2026-06-03.
 Supersedes the QKD-mixing portion of `docs/CLIENT-INTEGRATION.md` (v2).
 
@@ -72,7 +72,7 @@ link; it negotiates **PQC-only** (§5).
 
 ```diff
  pub struct ClientHello {
-     pub version: String,              // "3.1" (3.0 = flat labels, not kept)
+     pub version: String,              // "3.2" (3.1 = one session key both ways, refused; 3.0 = flat labels, not kept)
      pub client_random: [u8; 32],
      pub kem_ek: Vec<u8>,
      pub falcon_vk: Vec<u8>,
@@ -100,7 +100,7 @@ link; it negotiates **PQC-only** (§5).
  }
 
  pub struct ServerHello {
-     pub version: String,              // "3.1"
+     pub version: String,              // "3.2"
      pub server_random: [u8; 32],
      pub falcon_vk: Vec<u8>,
      pub slh_dsa_vk: Vec<u8>,
@@ -163,6 +163,15 @@ a Hybrid key, and the transcript step binds the key to the negotiated mode,
 is not kept. The v2 schedule (`src/crypto.rs::mix_keys`, `derive_session_key`)
 is unchanged, the KirQ Phase 1 client speaks it. Known-answer vectors:
 `tests/vectors/handshake-v3.json`, checked by `tests/kdf_kat.rs`.
+
+Since wire `3.2` (2026-10-14) `session_key` is not an AES key. Both ends
+expand it into one AES-256-GCM key per direction,
+`k_c2s = HMAC-SHA3-256(session_key, D[gateway/v3/key/c2s])` and
+`k_s2c = HMAC-SHA3-256(session_key, D[gateway/v3/key/s2c])`, count nonces per
+direction from 0, and accept only the next expected nonce
+(`docs/KEY-SCHEDULE.md` §5, `docs/CLIENT-INTEGRATION.md` §2.1). Up to `3.1`
+the session key sealed both directions with both counters at 0, which reused
+AES-GCM nonces across directions; a `3.2` gateway refuses `3.1` hellos.
 
 ---
 
@@ -266,15 +275,24 @@ QKD chain step (§4).
   `docs/KEY-SCHEDULE.md`). The change is to constants and keying, not to
   which inputs are bound, so the symbolic results in `formal/` stand
   unchanged; the vectors in `tests/vectors/` tie the models to the code.
+- **Session layer (wire `3.2`, 2026-10-14).** Until `3.1` the session key
+  was the AES-256-GCM key for both directions and both nonce counters began
+  at 0, so the client's first request and the server's first response
+  reused a nonce under one key, and frames were accepted at any nonce. Now
+  each direction has its own key and counter and the receiver accepts only
+  the next expected nonce, which also refuses replayed, reordered and
+  reflected frames (§4, `docs/KEY-SCHEDULE.md` §5). The `formal/` models end
+  at the session key and do not cover this layer.
 
 ---
 
 ## 8. Backward compatibility & migration
 
-- `ClientHello.version` negotiates: a v3 server SHOULD accept `"2."` (legacy,
-  PQC-only-or-bust per the v2 limitation) and `"3."`. The current check
-  `version.starts_with("2.")` in `perform_handshake` becomes
-  `starts_with("2.") || starts_with("3.")`, branching on the major.
+- `ClientHello.version` negotiates, by exact match since wire `3.2`: the
+  server accepts `"3.2"` and `"2.1"` (legacy v2, PQC-only per the v2
+  limitation) and nothing else (`proxy.rs::handshake_for_version`). The
+  earlier prefix match (`starts_with("2.")`, `starts_with("3.")`) admitted
+  peers whose key schedule or session layer had changed under them.
 - bincode is not self-describing: v2 and v3 structs are not mutually
   deserializable, so the version branch MUST pick the struct shape before
   decoding the body. Cleanest: read the frame, peek the leading `version`

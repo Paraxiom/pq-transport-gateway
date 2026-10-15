@@ -9,6 +9,16 @@
 
   Mirrors: src/crypto.rs (PqSession::{encrypt, decrypt, sign_and_encrypt,
   decrypt_and_verify}; nonce = 4-byte zero prefix ‖ 8-byte u64 counter).
+
+  Not covered here (wire 2.1 / 3.2, 2026-10-14). Each direction has its own
+  key (k_c2s, k_s2c, docs/KEY-SCHEDULE.md §5) and its own counter from 0, and
+  the receiver accepts only the next expected counter. Neither property is
+  stated or proved in this file. `nonce_unique_per_message` speaks about
+  counters within one direction and says nothing about keys: up to wire
+  2.0 / 3.1 it held while one key served both directions with both counters
+  at 0, so the two directions reused (key, nonce) pairs. Direction
+  separation and receive sequencing are covered by tests (src/crypto.rs,
+  tests/gateway_session.rs), not by Lean.
 -/
 
 import Mathlib.Tactic.NormNum
@@ -66,7 +76,8 @@ theorem nonce_counter_fits : nonce_counter_bytes ≤ gcm_nonce_size := by
 theorem nonce_zero_prefix : nonce_prefix_bytes + nonce_counter_bytes = gcm_nonce_size := by
   norm_num [nonce_prefix_bytes, nonce_counter_bytes, gcm_nonce_size]
 
-/-- Distinct counters produce distinct nonces (injectivity). -/
+/-- Distinct counters produce distinct nonces (injectivity), within one
+    direction. Says nothing about the key; see the module note. -/
 theorem nonce_unique_per_message (c1 c2 : ℕ) (h : c1 ≠ c2) :
     nonce_prefix_bytes + c1 ≠ nonce_prefix_bytes + c2 := by omega
 

@@ -106,15 +106,15 @@ fn write_entry(event_type: &str, details: serde_json::Value) {
     let json = match serde_json::to_string(&entry) {
         Ok(j) => j,
         Err(e) => {
-            eprintln!("Failed to serialize audit entry: {}", e);
+            eprintln!("Failed to serialize audit entry: {e}");
             return;
         }
     };
 
     let mut guard = AUDIT_LOG.lock().unwrap();
     if let Some(file) = guard.as_mut() {
-        if let Err(e) = writeln!(file, "{}", json) {
-            eprintln!("Failed to write audit log: {}", e);
+        if let Err(e) = writeln!(file, "{json}") {
+            eprintln!("Failed to write audit log: {e}");
         }
 
         // Ensure it's flushed

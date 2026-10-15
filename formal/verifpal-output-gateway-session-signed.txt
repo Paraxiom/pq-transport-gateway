@@ -1,0 +1,25 @@
+──────────────────────────────────────────────────
+  ◆ Verifpal 1.4.10 · https://verifpal.com
+──────────────────────────────────────────────────
+ Verifpal ◆ Verification initiated for 'pqtg-gateway-session-signed.vp' at 06:13:58 AM.
+     Info ● Analyzing 2 parallel sessions per principal; per-session values and principals are suffixed #2.
+     Info ● Attacker is configured as active.
+     Info ● Running at phase 0.
+
+[2K  phase 0 · Client · running · 0/8 queries resolved · 0ms
+[2K
+──────────────────────────────────────────────────
+ Verifpal ◆ Verification completed for 'pqtg-gateway-session-signed.vp' at 06:13:58 AM in 38ms.
+
+     Pass ✓ confidentiality? req0  [search exhausted at 2 sessions]
+     Pass ✓ confidentiality? req1  [search exhausted at 2 sessions]
+     Pass ✓ confidentiality? resp0  [search exhausted at 2 sessions]
+     Pass ✓ confidentiality? resp1  [search exhausted at 2 sessions]
+     Pass ✓ authentication? Client -> Server: q0  [search exhausted at 2 sessions]
+     Pass ✓ authentication? Client -> Server: q1  [search exhausted at 2 sessions]
+     Pass ✓ authentication? Server -> Client: a0  [search exhausted at 2 sessions]
+     Pass ✓ authentication? Server -> Client: a1  [search exhausted at 2 sessions]
+
+──────────────────────────────────────────────────
+     Pass ✓ All 8 queries pass.
+ Verifpal ◆ Thank you for using Verifpal.

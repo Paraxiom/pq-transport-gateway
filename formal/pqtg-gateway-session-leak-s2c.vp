@@ -1,0 +1,109 @@
+// PQTG gateway record layer, wire 2.1 / 3.2: the other direction key leaks
+// ---------------------------------------------------------------------------
+// The twin of pqtg-gateway-session-leak-c2s.vp: the server-to-client key is
+// handed to the attacker as soon as the client has it (phase 0, before any
+// frame). Expected: the responses lose confidentiality and authentication;
+// the requests keep both, because k_c2s cannot be computed from k_s2c.
+//
+// Two requests and two responses over one established gateway session, in the
+// order handle_session runs them (request, response, request, response).
+//
+//   session_key   = HASH(lbl_session, ss): stands in for the v2 flat schedule
+//                   and the v3 keyed chain alike (a one-way function of the KEM
+//                   secret). The handshake is stood in for, as in
+//                   pqtg-relay-ratchet.vp, by an ephemeral KEM whose public key
+//                   and ciphertext are delivered GUARDED (authentic), which is
+//                   what the signed, pinned, allow-listed handshake provides
+//                   (pqtg-handshake-clientauth.vp). Fresh per session.
+//   k_c2s         = MAC(session_key, lbl_c2s)    kdf::prf = HMAC-SHA3-256(session_key, D[gateway/vN/key/c2s])
+//   k_s2c         = MAC(session_key, lbl_s2c)    kdf::prf = HMAC-SHA3-256(session_key, D[gateway/vN/key/s2c])
+//   frame n       = AEAD_ENC(k_dir, n_n, m, nil): AES-256-GCM, no associated
+//                   data, nonce = session_nonce(n) = be32(0) ‖ be64(n).
+//                   Each direction counts from 0, so BOTH directions use the
+//                   same public nonce constants n0, n1: only the keys differ.
+//   client        seals requests with k_c2s, opens responses with k_s2c;
+//   server        the reverse (Role::Client / Role::Server).
+//   receive       AEAD_DEC(...)? at the slot's own nonce: the strict "next
+//                   expected nonce" rule, as far as fixed slots express it.
+//
+// The inner Falcon-512 signature on each payload (sign_and_encrypt) is left
+// out on purpose: this model asks what the record layer alone gives.
+// pqtg-gateway-session-signed.vp adds it.
+//
+// Verifpal 1.4.10 signature: AEAD_ENC(key, nonce, plaintext, ad) / AEAD_DEC(key, nonce, ct, ad)?
+//
+// Queries: confidentiality of every request and response; authentication of
+// every frame (no substitution, no replay into another slot, no reflection).
+
+attacker[active]
+
+principal Client[
+    knows public lbl_session, lbl_c2s, lbl_s2c, n0, n1
+    generates dk
+    ek = PUBKEY(dk)
+    generates req0, req1
+]
+
+principal Server[
+    knows public lbl_session, lbl_c2s, lbl_s2c, n0, n1
+    generates r
+    generates resp0, resp1
+]
+
+Client -> Server: [ek]
+
+principal Server[
+    ss, ct = KEM_ENCAP(ek, r)
+    sk_s = HASH(lbl_session, ss)
+    c2s_s = MAC(sk_s, lbl_c2s)
+    s2c_s = MAC(sk_s, lbl_s2c)
+]
+
+Server -> Client: [ct]
+
+principal Client[
+    ss_c = KEM_DECAP(dk, ct)
+    sk_c = HASH(lbl_session, ss_c)
+    c2s_c = MAC(sk_c, lbl_c2s)
+    s2c_c = MAC(sk_c, lbl_s2c)
+    leaks s2c_c
+    q0 = AEAD_ENC(c2s_c, n0, req0, nil)
+]
+
+Client -> Server: q0
+
+principal Server[
+    req0_s = AEAD_DEC(c2s_s, n0, q0, nil)?
+    a0 = AEAD_ENC(s2c_s, n0, resp0, nil)
+]
+
+Server -> Client: a0
+
+principal Client[
+    resp0_c = AEAD_DEC(s2c_c, n0, a0, nil)?
+    q1 = AEAD_ENC(c2s_c, n1, req1, nil)
+]
+
+Client -> Server: q1
+
+principal Server[
+    req1_s = AEAD_DEC(c2s_s, n1, q1, nil)?
+    a1 = AEAD_ENC(s2c_s, n1, resp1, nil)
+]
+
+Server -> Client: a1
+
+principal Client[
+    resp1_c = AEAD_DEC(s2c_c, n1, a1, nil)?
+]
+
+queries[
+    confidentiality? req0
+    confidentiality? req1
+    confidentiality? resp0
+    confidentiality? resp1
+    authentication? Client -> Server: q0
+    authentication? Client -> Server: q1
+    authentication? Server -> Client: a0
+    authentication? Server -> Client: a1
+]

@@ -7,7 +7,8 @@
   properties — sizes, framing limits, and structural injectivity claims.
   It does NOT prove cryptographic security properties (IND-CCA, mutual
   auth, forward secrecy); those are inherited from FIPS 203/204/206 and
-  the audited crates that implement them.
+  assumed of the crates that implement them, none of which this project
+  has had externally audited.
 
   Wire protocol (v2, KEM-based):
     ClientHello { client_random, kem_ek, falcon_vk, slh_dsa_vk, … }
@@ -136,7 +137,7 @@ theorem distinct_randoms_yield_distinct_inputs (r1 r2 fixed : ℕ) (h : r1 ≠ r
   The handshake's key-agreement convergence reduces to ML-KEM correctness:
   for any honestly-generated keypair, decapsulating an honest encapsulation
   yields the same shared secret. We record this as an axiom (the
-  implementation lives in the audited `ml-kem` crate; lattice arithmetic
+  implementation lives in the `ml-kem` crate; lattice arithmetic
   is not formalized here).
 -/
 

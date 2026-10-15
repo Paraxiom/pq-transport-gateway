@@ -191,10 +191,11 @@ impl QkdClient {
             client_builder = client_builder.add_root_certificate(cert);
         }
 
-        // Issue #4: cert validation is now configurable. Default `false`
-        // matches the historical behaviour (most vendor KMEs ship
-        // self-signed certs); production deployments that issue proper
-        // certs should set `qkd.tls_verify = true` in their config.
+        // Issue #4: cert validation is configurable and ON by default
+        // (`qkd.tls_verify = true`, see `config.rs::default_tls_verify`).
+        // Setting it to `false` accepts any certificate on the KME link and is
+        // meant only for bench KMEs with self-signed certs; prefer giving the
+        // KME's certificate through `qkd.vendor_cert` instead.
         client_builder = client_builder
             .danger_accept_invalid_certs(!config.qkd.tls_verify)
             .no_proxy();
@@ -237,7 +238,7 @@ impl QkdClient {
                 _ => anyhow!("ETSI 014 {}: {}", status, err.message),
             });
         }
-        Err(anyhow!("ETSI 014 {}: {}", status, body))
+        Err(anyhow!("ETSI 014 {status}: {body}"))
     }
 
     // ── Status (§5.1) ───────────────────────────────────────────────────────
@@ -317,8 +318,7 @@ impl QkdClient {
             .and_then(|n| u32::try_from(n).ok())
             .ok_or_else(|| {
                 anyhow!(
-                    "Key size {} bytes overflows u32 bit count for ETSI 014 wire format",
-                    size_bytes
+                    "Key size {size_bytes} bytes overflows u32 bit count for ETSI 014 wire format"
                 )
             })?;
         let req = EncKeysRequest {

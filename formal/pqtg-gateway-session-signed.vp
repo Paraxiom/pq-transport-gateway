@@ -1,0 +1,101 @@
+// PQTG gateway session frames as the gateway sends them, wire 2.1 / 3.2
+// ---------------------------------------------------------------------------
+// pqtg-gateway-session.vp plus the inner signature of sign_and_encrypt: each
+// payload is the data and a Falcon-512 signature over it by the sender's
+// long-term key, and decrypt_and_verify checks it under the peer's key.
+//
+//   payload       = CONCAT(m, SIGN(sender_sk, m))   len(4) ‖ data ‖ sig in the code
+//   receive       p = AEAD_DEC(...)?; m, s = SPLIT(p); SIGNVERIF(peer_vk, m, s)?
+//   client_vk     allow-listed at the gateway (authorized_keys), server_vk
+//                 pinned by the client (identity fingerprint): both delivered
+//                 GUARDED, as the handshake models assume.
+//
+// Everything else as in pqtg-gateway-session.vp.
+
+attacker[active]
+
+principal Client[
+    knows public lbl_session, lbl_c2s, lbl_s2c, n0, n1
+    knows private client_sk
+    client_vk = PUBKEY(client_sk)
+    generates dk
+    ek = PUBKEY(dk)
+    generates req0, req1
+]
+
+principal Server[
+    knows public lbl_session, lbl_c2s, lbl_s2c, n0, n1
+    knows private server_sk
+    server_vk = PUBKEY(server_sk)
+    generates r
+    generates resp0, resp1
+]
+
+Client -> Server: [client_vk]
+
+Server -> Client: [server_vk]
+
+Client -> Server: [ek]
+
+principal Server[
+    ss, ct = KEM_ENCAP(ek, r)
+    sk_s = HASH(lbl_session, ss)
+    c2s_s = MAC(sk_s, lbl_c2s)
+    s2c_s = MAC(sk_s, lbl_s2c)
+]
+
+Server -> Client: [ct]
+
+principal Client[
+    ss_c = KEM_DECAP(dk, ct)
+    sk_c = HASH(lbl_session, ss_c)
+    c2s_c = MAC(sk_c, lbl_c2s)
+    s2c_c = MAC(sk_c, lbl_s2c)
+    q0 = AEAD_ENC(c2s_c, n0, CONCAT(req0, SIGN(client_sk, req0)), nil)
+]
+
+Client -> Server: q0
+
+principal Server[
+    p0 = AEAD_DEC(c2s_s, n0, q0, nil)?
+    req0_s, qsig0 = SPLIT(p0)
+    qok0 = SIGNVERIF(client_vk, req0_s, qsig0)?
+    a0 = AEAD_ENC(s2c_s, n0, CONCAT(resp0, SIGN(server_sk, resp0)), nil)
+]
+
+Server -> Client: a0
+
+principal Client[
+    r0 = AEAD_DEC(s2c_c, n0, a0, nil)?
+    resp0_c, asig0 = SPLIT(r0)
+    aok0 = SIGNVERIF(server_vk, resp0_c, asig0)?
+    q1 = AEAD_ENC(c2s_c, n1, CONCAT(req1, SIGN(client_sk, req1)), nil)
+]
+
+Client -> Server: q1
+
+principal Server[
+    p1 = AEAD_DEC(c2s_s, n1, q1, nil)?
+    req1_s, qsig1 = SPLIT(p1)
+    qok1 = SIGNVERIF(client_vk, req1_s, qsig1)?
+    a1 = AEAD_ENC(s2c_s, n1, CONCAT(resp1, SIGN(server_sk, resp1)), nil)
+]
+
+Server -> Client: a1
+
+principal Client[
+    r1 = AEAD_DEC(s2c_c, n1, a1, nil)?
+    resp1_c, asig1 = SPLIT(r1)
+    aok1 = SIGNVERIF(server_vk, resp1_c, asig1)?
+]
+
+queries[
+    confidentiality? req0
+    confidentiality? req1
+    confidentiality? resp0
+    confidentiality? resp1
+    authentication? Client -> Server: q0
+    authentication? Client -> Server: q1
+    authentication? Server -> Client: a0
+    authentication? Server -> Client: a1
+]

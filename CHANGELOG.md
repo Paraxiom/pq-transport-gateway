@@ -1,0 +1,139 @@
+# Changelog
+
+## 3.0.0 (2026-10-15)
+
+3.0.0 because the gateway's wire versions change: a 3.0.0 gateway and a 2.x
+gateway or client do not interoperate. Upgrade every gateway and every client
+together.
+
+### Security: the gateway session reused AES-GCM nonces
+
+In 2.0.0, and on `main` through e50204d, the gateway session layer
+(`PqSession` in `src/crypto.rs`) used one AES-256-GCM key, the handshake's
+session key, for both directions, and both ends counted nonces from 0. A
+client following `docs/CLIENT-INTEGRATION.md` sealed its first request under
+the same key and nonce as the gateway's first response, and so on at every
+position. That exposes the XOR of the two plaintexts and lets an observer
+recover the GHASH authentication key of the session. The receiver also
+accepted any nonce, so frames could be replayed or reordered within a
+session. Details and recommended action: `SECURITY.md`, advisory of
+2026-10-14.
+
+Fixed (70be762):
+
+- The session key is expanded into one key per direction, under distinct,
+  versioned domains (`gateway/v2/key/{c2s,s2c}`, `gateway/v3/key/{c2s,s2c}`).
+- Each direction keeps its own counter from 0, which never wraps.
+- Each end accepts only the next expected frame, so replayed, reordered and
+  reflected frames are refused.
+- The handshakes and their key schedules are unchanged. Specified in
+  `docs/KEY-SCHEDULE.md` §5, with vectors in
+  `tests/vectors/gateway-session.json`.
+
+The relay (`src/relay.rs`, wire `relay-4`) was not affected and is unchanged.
+
+### Breaking: wire versions
+
+- The gateway speaks `2.1` (v2 handshake) and `3.2` (v3 handshake). It
+  refuses hellos for `2.0`, `3.0` and `3.1`, and a client following the
+  updated `docs/CLIENT-INTEGRATION.md` §2 step 4 refuses a server that answers
+  with an older version. A mismatch fails closed; nothing falls back to the
+  old session layer.
+- Deployments must move together. In particular the gateways at site 101 and
+  on the KR260 must be upgraded at the same time as the clients that talk to
+  them. A 3.0.0 gateway refuses the hellos of 2.x clients. A 2.x gateway
+  accepts any hello whose version starts with `2.`, so it does answer a
+  3.0.0 client's `2.1` hello, but with `2.0`; a 3.0.0 client following
+  `docs/CLIENT-INTEGRATION.md` refuses that ServerHello, and the two ends'
+  frame keys differ (3.0.0 derives one key per direction), so no frame
+  would decrypt in any case.
+- The identity file format (`proxy.key`) and `authorized_keys` entries are
+  unchanged. Checked on this machine with two freshly generated identities:
+  one from the published 2.0.0 crate (with `paraxiom-pqc` 0.1.2) and one from
+  the pre-release tree at dad0a0a (with 0.1.3). Each loads in 3.0.0, signs and
+  verifies; for the dad0a0a one, 3.0.0 also prints the same fingerprint as the
+  code that made it. Not checked with the identity files on the deployed
+  hosts.
+- An identity whose Falcon-512 key does not have the expected length and
+  header (secret key 1281 bytes starting `0x59`, public key 897 bytes
+  starting `0x09`), or whose verification keys carry another algorithm, is
+  now refused when it is loaded. Before, under `paraxiom-pqc` 0.2.0, such a
+  file would load and every handshake would then fail when signing. Both
+  identities above pass the check. On a deployed host,
+  `xxd -s 6 -l 5 proxy.key` prints `0000 0501 59` for a well-formed file.
+
+### Dependencies: paraxiom-pqc 0.2.0
+
+- `paraxiom-pqc` comes from crates.io, version `0.2`, instead of a git
+  revision (0.1.3, c0ee1f7). The ML-DSA and SLH-DSA code it vendors arrives as
+  `paraxiom-ml-dsa` 0.1.0-rc.7 and `paraxiom-slh-dsa` 0.2.0-rc.4. No crate that
+  compiles C was added.
+- 0.2.0 clears its secret key types and shared secrets from memory when they
+  are dropped. In the gateway this covers the long-term Falcon-512 and
+  SLH-DSA signing keys in `PqKeyExchange` and the ML-KEM decapsulation key in
+  `EphemeralKemKey`. It does not cover the copies listed under known limits.
+- 0.2.0 checks that a Falcon key's header and length match the degree its
+  label names. The gateway generates, stores and pins only Falcon-512 keys
+  labelled Falcon-512, so its keys pass; two new tests in `src/crypto.rs`
+  check the headers of generated keys and that a key of another degree never
+  verifies (a Falcon-1024 key passed as Falcon-512 was accepted with 0.1.3).
+- 0.2.0 refuses to create Falcon keys or sign with them on targets other
+  than x86/x86_64 with SSE2 and AArch64 with NEON. Gateways and clients both
+  sign with Falcon. Built and tested on macOS arm64 only; not tested on the
+  KR260 (AArch64) or any other target.
+
+### Since 2.0.0, already on `main` before this release
+
+2.0.0 on crates.io was built from 1e109c3, a commit that is not in the
+history of this branch; it speaks wire `2.0` only. Compared with it, 3.0.0
+also has the following (see the git history of `main` for each):
+
+- Wire protocol v3: the ETSI 014 `key_ID`, key mode, master SAE-ID and key
+  length bound under the transcript signature; the client signs its hello;
+  freshness and replay guard on v3 hellos (`docs/PROTOCOL-V3-QKD-KEYID.md`).
+- Hardened key schedule for v3 and the relay: domain tree and keyed chaining
+  KDF (`docs/KEY-SCHEDULE.md`).
+- The post-quantum TCP relay (`src/relay.rs`), with server pinning and client
+  authentication.
+- Single-use ephemeral KEM keys, one-time zeroized QKD keys, and the server
+  handshake as a type-state machine.
+- Licence: GPL-3.0-only, or a Paraxiom commercial licence (`LICENSE.md`).
+  2.0.0 was published as MIT OR Apache-2.0.
+
+### Tests and checks added on this branch
+
+Property tests, key-leak tests, payload tests and fuzz targets for the
+session layer, Verifpal models and Kani harnesses. What each one ran and
+found is in `formal/GATEWAY-SESSION-RESULTS-2026-10-15.md`; of the seven Kani
+harnesses, one reached a verdict. None of this is an external audit or a
+proof of the cryptographic code. Those runs used `paraxiom-pqc` 0.1.3 and
+were not repeated on 0.2.0.
+
+### Known limits
+
+- **Replay under a one-direction key leak (THREAT-MODEL L6).** The Falcon
+  signature inside each gateway frame covers the data only, not the session,
+  direction or position. If an attacker learns `k_c2s`, it can re-seal a
+  request the client really signed at a later position of the same session,
+  or into another session whose `k_c2s` it also holds, and the gateway
+  accepts it. It still cannot forge a request the client never signed, and
+  the other direction is unaffected. Closing this needs a wire change; not
+  done.
+- **Memory wiping gaps (THREAT-MODEL T12).** Not wiped, among others: the
+  32-byte ML-KEM shared secret copies returned by `encapsulate_to` and
+  `EphemeralKemKey::decapsulate` and held through the handshake, the v2
+  QKD-mixed secret, the handshake `session_key`, the AES key schedules inside
+  `Aes256Gcm` (`aes-gcm` is built without its `zeroize` feature), and the
+  buffers that hold an encoded identity while it is saved or loaded. Identity
+  keys are stored unencrypted on disk (mode 0o600).
+- Not externally audited.
+
+### Other
+
+- Inline format arguments flagged by clippy 1.88; messages unchanged.
+
+## 2.0.0
+
+Wire-incompatible with 1.0.0: real ML-KEM-768 key encapsulation replaces the
+signature-only "shared secret" of 1.0.0, which did not produce a shared
+secret. 1.0.0 is yanked. 2.0.0 is affected by the nonce reuse fixed in 3.0.0.

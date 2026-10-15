@@ -1,0 +1,33 @@
+{
+  "_about": "Generated independently (Python hashlib SHA3-256 + hmac) from docs/KEY-SCHEDULE.md. Byte-pattern inputs are NOT valid keys, only hashed. Rust: tests/kdf_kat.rs.",
+  "inputs": {
+    "v3_session_key_pqc_only": "1827195cc1028692cb9c016994fb45d523ae2e691cca9b417d62f893e3a3965e",
+    "v3_session_key_hybrid": "5aaa2b1c93da0c06428fbb027658aeb03ce80fa444cac9d934b1a76884525184",
+    "v2_session_key": "c28b0077eb31090371989436786f6b64de4ae67a307da1dcca8b713a1a77aae8",
+    "nonce_counters": [
+      0,
+      1,
+      72623859790382856
+    ]
+  },
+  "expected": {
+    "v3_pqc_only_key_c2s": "58c81ac531ef15a2dbb40aa0c7f74df604910b77a0dc14954acc3c0569f80a37",
+    "v3_pqc_only_key_s2c": "2bd7097d0dd73f20c3e9ae9e2d30302462712e68abfef94317a0dc9b8fb84f68",
+    "v3_hybrid_key_c2s": "1c61aaa1b904786ee904169b66f09451d2ede431b2db50e88849b003ef2c279f",
+    "v3_hybrid_key_s2c": "7708fd1ba2978471d55c06ac888f07d9d6286ea99b8139d9917814a255eaee76",
+    "v2_key_c2s": "86579f489563e3f0eefa7ffac08a79e804507321131fd24059b75c1e3cc1bfba",
+    "v2_key_s2c": "bd529586c71237125492c3acbadf77f66a68be7e99bed80f0a93c14f094dbef7",
+    "nonces": [
+      "000000000000000000000000",
+      "000000000000000000000001",
+      "000000000102030405060708"
+    ]
+  },
+  "rules": {
+    "direction_key": "k_dir = HMAC(session_key, D[gateway/vN/key/dir]), no further parts; N=3 for wire 3.2, N=2 for wire 2.1",
+    "roles": "the client seals with k_c2s and opens with k_s2c; the server seals with k_s2c and opens with k_c2s",
+    "nonce": "be32(0) || be64(counter), one counter per direction, each from 0",
+    "receive": "accept a frame only if its nonce is the next expected one, then advance",
+    "sources": "v3 session keys = handshake-v3.json session keys; v2 session key = handshake-v2.json session_key_pqc_only"
+  }
+}

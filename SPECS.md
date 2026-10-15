@@ -58,9 +58,13 @@ Classical TLS is **never** exposed on eth0. Verified by tcpdump per
 1. Client → PQTG: `ClientHello` with ML-KEM-768 public key, client_random
 2. PQTG → Client: `ServerHello` with Falcon-512 signature over
    `(transcript_hash, server_random)`, ML-KEM-768 ciphertext
-3. Both sides: HKDF-SHA3-256 derives session keys from
-   `(ml_kem_shared_secret, transcript_hash)`
-4. AEAD: AES-256-GCM session keys protect subsequent ETSI 014 calls
+3. Both sides derive a 32-byte session key from
+   `(ml_kem_shared_secret, transcript_hash)`: SHA3-256 over flat labels
+   in v2 (`derive_session_key`), an HMAC-SHA3-256 keyed chain in v3
+   (`docs/KEY-SCHEDULE.md` §4). No HKDF is used.
+4. The session key is expanded by an HMAC-SHA3-256 PRF into one
+   AES-256-GCM key per direction, `k_c2s` and `k_s2c`
+   (`docs/KEY-SCHEDULE.md` §5); these protect subsequent ETSI 014 calls
 
 Mutual authentication: client-side Falcon identity verified against
 `authorized_keys` file before any ETSI 014 forwarding.
@@ -82,20 +86,20 @@ Error responses per spec §5.3 (`400` / `401` / `503` with structured
 
 ### 2.5 Audit trail
 
-Every control-plane operation (handshake, key forward, error) emits a
-JSON line signed with SLH-DSA-Shake128f. Logs are append-only and
-verifiable offline via a replay tool. Signature scheme is hash-based
-(stateless), so log tamper detection survives signing-key compromise.
+Control-plane events (connection, key request, QKD key use, refused
+client) are appended to a JSON-lines log. The entries are not signed: an
+SLH-DSA-Shake128f signing path exists (`PqKeyExchange::sign_hash_based`)
+but is not wired to the log, and no verification tool ships in this
+repository (`docs/THREAT-MODEL.md` S4, T9).
 
-### 2.6 Optional QKD-key-mix
+### 2.6 Optional QKD-key-mix (protocol v3 only)
 
-The `mix_keys(qkd_key, ml_kem_shared_secret)` code path combines a
-KMS-supplied QKD key with the ML-KEM secret to produce the session key.
-Result: information-theoretic security from QKD + post-quantum security
-from ML-KEM, in one channel.
-
-Enabled per-deployment via config. Default off in conformance testing
-(`[DEFAULT-1]` in `docs/kirq/TEST-PLAN.md`).
+In protocol v3 the key schedule mixes a KMS-supplied QKD key into the
+session key through a keyed chain (`docs/KEY-SCHEDULE.md` §4), when the
+client asks for it and the KME can supply it. The mode is negotiated per
+session and signed by the server (`key_mode`). Mixing through a PRF is
+computationally secure; it does not carry over the information-theoretic
+security of the QKD key. Protocol v2 never mixes a QKD key.
 
 ---
 
@@ -105,9 +109,9 @@ Enabled per-deployment via config. Default off in conformance testing
 |---------------------------|------------------------|--------------------|----------------|
 | Long-term identity sig    | Falcon-512             | FIPS 206 (pending) | paraxiom-pqc   |
 | Ephemeral KEM             | ML-KEM-768             | FIPS 203           | paraxiom-pqc   |
-| Audit-log sig             | SLH-DSA-Shake128f      | FIPS 205           | paraxiom-pqc   |
+| Second client key (allow-list only, signs nothing) | SLH-DSA-Shake128f | FIPS 205 | paraxiom-pqc |
 | Transcript hash           | SHA3-256               | FIPS 202           | sha3 crate     |
-| Session key derivation    | HKDF-SHA3-256          | RFC 5869           | hkdf crate     |
+| Session key derivation    | SHA3-256 over labels (v2); HMAC-SHA3-256 keyed chain (v3); HMAC-SHA3-256 PRF for the per-direction keys | FIPS 202, RFC 2104 | sha3 + hmac crates; `docs/KEY-SCHEDULE.md` |
 | AEAD                      | AES-256-GCM            | NIST SP 800-38D    | aes-gcm crate  |
 
 Falcon-512 signature size: 666 bytes typical.
@@ -141,7 +145,7 @@ Key parameters:
 | Target                        | Status         | Notes                                                |
 |-------------------------------|----------------|------------------------------------------------------|
 | x86_64 Linux (Debian/RHEL)    | Supported      | Primary dev target                                   |
-| ARM Cortex-A53 (Yocto)        | Supported      | Xilinx Kria KR260, Zynq UltraScale+ MPSoC            |
+| ARM Cortex-A53 (Yocto)        | Expected       | Xilinx Kria KR260, Zynq UltraScale+ MPSoC; untested with paraxiom-pqc 0.2.0 (Falcon needs NEON) |
 | ARM64 generic Linux           | Should work    | Untested but no platform-specific code               |
 | macOS                         | Dev-only       | Builds and runs; not a deployment target             |
 
@@ -200,7 +204,9 @@ Semantic versioning. Wire-format compatibility:
 - **Minor bump** for backward-compatible feature additions.
 - **Patch bump** for bug fixes and non-protocol-breaking improvements.
 
-Current version: `2.0.0` (released, see `Cargo.toml`).
+Current version: `3.0.0` (see `Cargo.toml` and `CHANGELOG.md`). It broke 2.0.0
+at the wire (gateway `2.1` / `3.2`) to fix nonce reuse in the gateway session;
+2.0.0 is superseded; do not use it.
 
 ---
 

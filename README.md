@@ -168,12 +168,6 @@ are listed in `docs/THREAT-MODEL.md` (§6). It has not been externally
 audited. Pin exactly (`= "3.0.0"`) if you depend on this for anything
 load-bearing.
 
-## Open-core boundary
-
-The anomaly-detection **method** in `src/anomaly.rs` is public and auditable. The QBER
-measurement data it is trained on, and any models derived from it, are proprietary and are
-not distributed.
-
 ## License
 
 **GPL-3.0-only**, or a **Paraxiom commercial licence**, at your option — see `LICENSE.md`.

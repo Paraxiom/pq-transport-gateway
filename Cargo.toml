@@ -8,6 +8,10 @@ license = "GPL-3.0-only"
 keywords = ["quantum", "cryptography", "post-quantum", "qkd", "proxy"]
 categories = ["cryptography", "network-programming"]
 repository = "https://github.com/Paraxiom/pq-transport-gateway"
+# The 2026 whitepaper draft states claims this release does not support (a
+# theorem count, the MIT licence, SPHINCS+-256f signatures); it stays in the
+# repository but is not shipped in the crate.
+exclude = ["docs/pqtg_whitepaper_revised.*"]
 
 [workspace]
 # Standalone workspace to avoid parent conflicts

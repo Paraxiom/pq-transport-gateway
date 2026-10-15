@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.0.0 (unreleased)
+## 3.0.0 (2026-10-15)
 
 3.0.0 because the gateway's wire versions change: a 3.0.0 gateway and a 2.x
 gateway or client do not interoperate. Upgrade every gateway and every client
@@ -41,8 +41,12 @@ The relay (`src/relay.rs`, wire `relay-4`) was not affected and is unchanged.
   old session layer.
 - Deployments must move together. In particular the gateways at site 101 and
   on the KR260 must be upgraded at the same time as the clients that talk to
-  them; a 3.0.0 gateway does not accept their 2.x clients, and a 2.x gateway
-  does not accept 3.0.0 clients.
+  them. A 3.0.0 gateway refuses the hellos of 2.x clients. A 2.x gateway
+  accepts any hello whose version starts with `2.`, so it does answer a
+  3.0.0 client's `2.1` hello, but with `2.0`; a 3.0.0 client following
+  `docs/CLIENT-INTEGRATION.md` refuses that ServerHello, and the two ends'
+  frame keys differ (3.0.0 derives one key per direction), so no frame
+  would decrypt in any case.
 - The identity file format (`proxy.key`) and `authorized_keys` entries are
   unchanged. Checked on this machine with two freshly generated identities:
   one from the published 2.0.0 crate (with `paraxiom-pqc` 0.1.2) and one from
@@ -50,6 +54,13 @@ The relay (`src/relay.rs`, wire `relay-4`) was not affected and is unchanged.
   verifies; for the dad0a0a one, 3.0.0 also prints the same fingerprint as the
   code that made it. Not checked with the identity files on the deployed
   hosts.
+- An identity whose Falcon-512 key does not have the expected length and
+  header (secret key 1281 bytes starting `0x59`, public key 897 bytes
+  starting `0x09`), or whose verification keys carry another algorithm, is
+  now refused when it is loaded. Before, under `paraxiom-pqc` 0.2.0, such a
+  file would load and every handshake would then fail when signing. Both
+  identities above pass the check. On a deployed host,
+  `xxd -s 6 -l 5 proxy.key` prints `0000 0501 59` for a well-formed file.
 
 ### Dependencies: paraxiom-pqc 0.2.0
 

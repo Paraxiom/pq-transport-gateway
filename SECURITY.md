@@ -38,7 +38,7 @@ We follow coordinated disclosure. Because PQTG addresses a known class of vulner
 | Version | Supported | Notes |
 |---|---|---|
 | 3.0.x | Yes | Gateway wire `2.1` / `3.2`, relay `relay-4`. Uses `paraxiom-pqc` 0.2. |
-| 2.0.0 | **No** | Affected by the gateway session nonce reuse (advisory of 2026-10-14 below). To be yanked from crates.io after 3.0.0 is published. Not wire-compatible with 3.0.0. |
+| 2.0.0 | **No** | Affected by the gateway session nonce reuse (advisory of 2026-10-14 below). Superseded by 3.0.0; do not use. Not wire-compatible with 3.0.0. |
 | 1.0.0 | **No** | Yanked. Its handshake did not produce a shared secret. |
 
 Commits on `main` from the initial public release (e3bf242) through e50204d
@@ -61,9 +61,18 @@ are affected by the same nonce reuse as 2.0.0.
 ## Security properties
 
 - Written in Rust for memory safety
-- 99 Lean 4 theorems
 - Post-quantum algorithms: ML-KEM-768 (FIPS 203) for key encapsulation; Falcon-512 (FN-DSA, FIPS 206, still a draft) for every signature the protocol uses. Clients also present an SLH-DSA-Shake128f (FIPS 205) key, matched against `authorized_keys` and never used to sign or verify
 - Designed as a drop-in replacement for the classical TLS layer in ETSI GS QKD 014 deployments
+
+## Lean models
+
+`lean/` holds 111 Lean 4 theorem declarations about abstract models of the
+protocol: parameter sizes, handshake structure, session framing, key mixing,
+ETSI 014 handling and authentication. They rest on one declared axiom
+(`kem_correctness_abstract` in `Handshake.lean`) and contain no `sorry`. They
+are not linked to the Rust code, do not prove the security of the
+cryptographic schemes, and do not cover the per-direction session keys of
+3.0.0. They were not built for this release.
 
 ## Known limitations
 

@@ -59,6 +59,13 @@ const KEY_MIXING_LABEL: &[u8] = b"pqtg-key-mixing-v2";
 /// Falcon-512 verification key length. Matches `lean/PQTGProofs/Falcon.lean::pk_size`.
 pub const FALCON_512_VK_LEN: usize = 897;
 
+/// Falcon-512 encoded secret key length and the first byte of each encoded
+/// key (`0x00 + logn`, `0x50 + logn`, logn = 9), as checked by
+/// `paraxiom-pqc` 0.2.0 against the `Falcon512` label.
+const FALCON_512_SK_LEN: usize = 1281;
+const FALCON_512_VK_HEADER: u8 = 0x09;
+const FALCON_512_SK_HEADER: u8 = 0x59;
+
 /// SLH-DSA-Shake128f verification key length. Matches `lean/PQTGProofs/Sphincs.lean::pk_size`.
 pub const SLH_DSA_SHAKE128F_VK_LEN: usize = 32;
 
@@ -870,6 +877,29 @@ impl PqKeyExchange {
                 HASH_ALG
             ));
         }
+        if sig_vk.algorithm != SIG_ALG || hash_vk.algorithm != HASH_ALG {
+            return Err(anyhow!(
+                "Identity verification key algorithms ({:?}, {:?}) do not match expected ({:?}, {:?})",
+                sig_vk.algorithm,
+                hash_vk.algorithm,
+                SIG_ALG,
+                HASH_ALG
+            ));
+        }
+        // `paraxiom-pqc` 0.2.0 refuses to sign with a Falcon key whose header
+        // or length does not match its label. Check here so that a corrupt or
+        // mislabelled identity fails when it is loaded, not at the first
+        // handshake.
+        if sig_sk.bytes.len() != FALCON_512_SK_LEN || sig_sk.bytes[0] != FALCON_512_SK_HEADER {
+            return Err(anyhow!(
+                "Identity Falcon-512 secret key is malformed (expected {FALCON_512_SK_LEN} bytes with header 0x{FALCON_512_SK_HEADER:02X})"
+            ));
+        }
+        if sig_vk.bytes.len() != FALCON_512_VK_LEN || sig_vk.bytes[0] != FALCON_512_VK_HEADER {
+            return Err(anyhow!(
+                "Identity Falcon-512 public key is malformed (expected {FALCON_512_VK_LEN} bytes with header 0x{FALCON_512_VK_HEADER:02X})"
+            ));
+        }
         Ok(Self {
             sig_sk,
             sig_vk,
@@ -1658,5 +1688,42 @@ mod tests {
             PqKeyExchange::verify_falcon(msg, &sig_1024.bytes, &kp.vk.bytes),
             Ok(true)
         ));
+    }
+
+    /// A stored identity whose Falcon key carries the wrong header is refused
+    /// when it is loaded. Layout: magic (4) + version (1) + algo tag (1) +
+    /// length (4), then the secret key; its public key follows after another
+    /// 4-byte length.
+    #[test]
+    fn decode_refuses_a_falcon_key_with_the_wrong_header() {
+        let encoded = PqKeyExchange::new().unwrap().encode().unwrap();
+        let sk_at = 4 + 1 + 1 + 4;
+        assert_eq!(encoded[sk_at], 0x59);
+        let vk_at = sk_at + 1281 + 4;
+        assert_eq!(encoded[vk_at], 0x09);
+
+        let mut bad_sk = encoded.clone();
+        bad_sk[sk_at] = 0x5A;
+        let err = PqKeyExchange::decode(&bad_sk).unwrap_err();
+        assert!(err.to_string().contains("secret key is malformed"), "{err}");
+
+        let mut bad_vk = encoded;
+        bad_vk[vk_at] = 0x0A;
+        let err = PqKeyExchange::decode(&bad_vk).unwrap_err();
+        assert!(err.to_string().contains("public key is malformed"), "{err}");
+    }
+
+    /// Keys of the right algorithm but the wrong length are refused too.
+    #[test]
+    fn from_signing_keys_refuses_a_short_falcon_secret_key() {
+        let falcon = sign::keypair(SIG_ALG).unwrap();
+        let slh = sign::keypair(HASH_ALG).unwrap();
+        let short = SigningKey {
+            algorithm: SIG_ALG,
+            bytes: falcon.sk.bytes[..1280].to_vec(),
+        };
+        let err =
+            PqKeyExchange::from_signing_keys(short, falcon.vk.clone(), slh.sk, slh.vk).unwrap_err();
+        assert!(err.to_string().contains("secret key is malformed"), "{err}");
     }
 }

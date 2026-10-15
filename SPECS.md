@@ -145,7 +145,7 @@ Key parameters:
 | Target                        | Status         | Notes                                                |
 |-------------------------------|----------------|------------------------------------------------------|
 | x86_64 Linux (Debian/RHEL)    | Supported      | Primary dev target                                   |
-| ARM Cortex-A53 (Yocto)        | Supported      | Xilinx Kria KR260, Zynq UltraScale+ MPSoC            |
+| ARM Cortex-A53 (Yocto)        | Expected       | Xilinx Kria KR260, Zynq UltraScale+ MPSoC; untested with paraxiom-pqc 0.2.0 (Falcon needs NEON) |
 | ARM64 generic Linux           | Should work    | Untested but no platform-specific code               |
 | macOS                         | Dev-only       | Builds and runs; not a deployment target             |
 
@@ -206,7 +206,7 @@ Semantic versioning. Wire-format compatibility:
 
 Current version: `3.0.0` (see `Cargo.toml` and `CHANGELOG.md`). It broke 2.0.0
 at the wire (gateway `2.1` / `3.2`) to fix nonce reuse in the gateway session;
-2.0.0 is to be yanked.
+2.0.0 is superseded; do not use it.
 
 ---
 

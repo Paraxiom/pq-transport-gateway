@@ -25,7 +25,7 @@ Commits without a sign-off will be rejected by CI.
 - **Formatting:** `cargo fmt --all` must produce no changes
 - **Linting:** `cargo clippy --all-targets -- -D warnings` must pass
 - **Unsafe code:** Avoid `unsafe` blocks in cryptographic paths. If unavoidable, include a safety comment
-- **Lean proofs:** Update the 99 Lean 4 theorems if you change the proven protocol surface
+- **Lean models:** Update the Lean 4 models in `lean/` if you change the protocol surface they describe
 
 ## Testing
 

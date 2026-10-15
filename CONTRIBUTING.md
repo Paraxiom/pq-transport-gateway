@@ -48,4 +48,4 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/).
 
 ## License
 
-By contributing, you agree that your contributions are licensed under the terms of both [LICENSE-APACHE](LICENSE-APACHE) and [LICENSE-MIT](LICENSE-MIT).
+Contributions are accepted under the terms in [LICENSE.md](LICENSE.md).

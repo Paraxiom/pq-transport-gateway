@@ -68,6 +68,9 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio-test = "0.4"
 httpmock = "0.7"
 criterion = { version = "0.5", features = ["html_reports"] }
+# Model-based tests of the session layer (tests/session_model.rs). Pure Rust;
+# the fork and timeout features are left out.
+proptest = { version = "1", default-features = false, features = ["std"] }
 
 [[bench]]
 name = "handshake"

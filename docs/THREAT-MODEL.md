@@ -78,8 +78,7 @@ resolve one; `cargo install --locked` uses the published `Cargo.lock`.
   verification keys (`authorized_keys`). Both keys are matched against the
   file; only the Falcon-512 key is ever used to verify a signature (the v3
   hello signature and the per-frame signatures), never the SLH-DSA key.
-  *Enforced as of issue
-  [#1](https://github.com/Paraxiom/pq-transport-gateway/issues/1) fix:
+  *Enforced by the `authorized_keys` check:
   unauthorized peers are rejected before any keypair generation,
   fail-closed on empty file. Covered by `auth::tests` (7 unit tests).*
 - **S3** Authentication of PQTG to clients via server-side Falcon-512
@@ -94,9 +93,9 @@ resolve one; `cargo install --locked` uses the published `Cargo.lock`.
 - **S6** Mutual binding of session to fresh randomness from both sides
   (`client_random` and `server_random` in the transcript hash).
 - **S7** Resistance to handshake flooding from a bounded set of unauthorized
-  sources (per-source rate limit + cookie-PoW pre-handshake; see issue
-  [#7](https://github.com/Paraxiom/pq-transport-gateway/issues/7)).
-  *Status: in-scope as of 2026-05-05; mitigations not yet shipped.*
+  sources (per-source rate limit + cookie-PoW pre-handshake).
+  *Status: in-scope as of 2026-05-05; mitigations not yet shipped, and not
+  yet tracked in a public issue.*
 
 ### Out of scope
 
@@ -130,7 +129,7 @@ resolve one; `cargo install --locked` uses the published `Cargo.lock`.
 |T8 | **`authorized_keys` file tampering** by local privileged process.            | Mitigated by A1| File permissions enforced 0o600 by `--generate-keys`. Unauthorized rewrite implies A1 violation; not an additional defense layer.                                                                     |
 |T9 | **Audit log post-hoc tampering**.                                            | **Detected, with limits** (S4) | Each run's lines form a hash chain over their exact bytes (`audit.rs::chain_entry`), and after `audit_checkpoint_events` events or `audit_checkpoint_secs` seconds the gateway signs the chain head, bound to the run's random `log_id`, with its SLH-DSA-Shake128f identity key (`checkpoint` lines). `--verify-audit-log` reports a line before the last checkpoint that was edited, removed, inserted or moved; a checkpoint signed for another log or by another key; and a change to the line before a run's first line. Limits: the signing key is a file on the same host (A1), so whoever controls the host can rewrite the log and re-sign it; events after the last checkpoint stay unsigned until the next one; removing the end of the file, its last checkpoint included, cannot be detected from the file alone (copy checkpoints off the host to cover that); a run without a persisted identity is chained but not signed, and a chain without a signature proves nothing, so the verifier reports such runs, runs with no checkpoint and files that start mid-run as not verified (exit 2) rather than OK; rotating with `copytruncate` produces such a file, so rotate by renaming; verification needs `proxy.pub` obtained out of band. Tests: `audit::tests`, `tests/audit_verify_cli.rs`; vectors `tests/vectors/audit-v1.json`. |
 |T10| **Nonce reuse, replay, reordering or reflection** of session frames.          | Mitigated since wire `2.1` / `3.2` | Before wire `2.1` / `3.2` this row said Mitigated and was wrong: one AES-256-GCM key (`session_key`) served both directions and both counters started at 0, so a client's first request and the gateway's first response were sealed under the same key and nonce (nonce reuse across directions), and the receiver accepted any nonce. Now the session key is expanded into one key per direction (`crypto.rs::derive_direction_keys`, `docs/KEY-SCHEDULE.md` §5); each direction counts its own nonces from 0 (4 zero bytes ‖ 8-byte big-endian counter, never wraps, exhaustion is an error on both sides); and the receiver accepts only the next expected nonce, so strict receive sequencing also refuses replayed, reordered and reflected frames (`PqSession::decrypt`). Older clients are refused at the hello. Tested in `crypto::tests` and end to end over TCP in `tests/gateway_session.rs`. |
-|T11| **DoS** via handshake flood from a single or small set of sources.           | **Pending mitigation** (S7) | `max_connections` + `connection_timeout` provide soft limits today. Issue [#7](https://github.com/Paraxiom/pq-transport-gateway/issues/7) tracks per-source rate limiting + cookie-PoW pre-handshake + inotify reload of `authorized_keys` for fast revocation. Botnet-class DDoS remains out-of-scope (O3). |
+|T11| **DoS** via handshake flood from a single or small set of sources.           | **Pending mitigation** (S7) | `max_connections` + `connection_timeout` provide soft limits today. Planned, not yet tracked in a public issue: per-source rate limiting, a cookie-PoW pre-handshake, and inotify reload of `authorized_keys` for fast revocation. Botnet-class DDoS remains out-of-scope (O3). |
 |T12| **Side-channel leaks** in the host OS.                                       | Out of scope (O2)| Memory hygiene is partial. Since 3.0.0 the crate uses `paraxiom-pqc` 0.2.0, whose secret types (ML-KEM decapsulation keys, Falcon and SLH-DSA signing keys, shared secrets) are wiped on drop; in PQTG that covers the long-term signing keys in `PqKeyExchange` and the decapsulation key in `EphemeralKemKey`. PQTG also wipes on drop: the per-direction record keys (`crypto::DirectionKeys`), the v3 key-schedule chain (`kdf::Chain`), the relay's epoch keys and ratchet KEM secrets, and the ETSI 014 key material (`Zeroizing`). Not wiped, among others: the 32-byte copies of the ML-KEM shared secret returned by `encapsulate_to` and `EphemeralKemKey::decapsulate` and held through the handshake (`pqc_secret`), the v2 QKD-mixed secret, the 32-byte handshake `session_key`, the expanded AES key schedules inside `Aes256Gcm` (`aes-gcm` is built without its `zeroize` feature), and the buffers holding an encoded identity while it is saved (`PqKeyExchange::encode`) or loaded (`load_if_present`). Identity keys are stored unencrypted on disk (file mode 0o600). These wiping claims are read from the code and `paraxiom-pqc`'s documentation; this crate has no test that checks them. Beyond that, host hardening is the deployer's responsibility. |
 |T13| **Vendor KME compromise** (key generation issues, forged TLS).               | Out of scope (O6)| PQTG cannot distinguish a compromised KME from a working one; it ships whatever the KME delivers.                                                                                                  |
 
@@ -160,8 +159,7 @@ resolve one; `cargo install --locked` uses the published `Cargo.lock`.
 
 ## 6. Known limitations
 
-- **L1** ~~Long-lived signing-key persistence~~ — **resolved by issue
-  [#3](https://github.com/Paraxiom/pq-transport-gateway/issues/3)**.
+- **L1** ~~Long-lived signing-key persistence~~ — **resolved**.
   Falcon-512 + SLH-DSA-Shake128f signing keys are persisted to disk via
   `PqKeyExchange::{encode, decode, save, load_if_present}`, atomic
   `tmp + rename` write, 0o600 enforced, secure-permissions check on
@@ -169,8 +167,7 @@ resolve one; `cargo install --locked` uses the published `Cargo.lock`.
   Round-trip + truncation + bad-magic + bad-version covered by 6 unit
   tests in `crypto::tests`.
 - **L2** Client→server authentication: clients are authorized by vk
-  lookup (issue [#1](https://github.com/Paraxiom/pq-transport-gateway/issues/1)
-  fix), but no challenge-response (clients are not asked to prove they
+  lookup (`authorized_keys`), but no challenge-response (clients are not asked to prove they
   hold the `dk` matching the `ek` they published). Adding this would
   promote "Server→client only" to "Mutual" in §5. The Verifpal model
   (`formal/VERIFICATION-RESULTS-2026-09-12.md`, finding F1) makes the
@@ -180,8 +177,7 @@ resolve one; `cargo install --locked` uses the published `Cargo.lock`.
   signature; in-session client signatures bound the damage). Tracked as
   backlog B6. Server→client pinning: the server-side enabler
   (`compute_identity_fingerprint` + `--print-fingerprint` +
-  `docs/CLIENT-INTEGRATION.md`) shipped under issue
-  [#2](https://github.com/Paraxiom/pq-transport-gateway/issues/2), and
+  `docs/CLIENT-INTEGRATION.md`) has shipped, and
   as of 2026-09-12 the **relay client enforces it**: `relay.pin` is
   required in client mode (`relay.allow_unpinned` is an explicit,
   WARN-logged opt-out), the fingerprint is checked before the signature,

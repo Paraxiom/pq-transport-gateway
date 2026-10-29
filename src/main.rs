@@ -68,19 +68,25 @@ async fn main() -> Result<()> {
     // could never be checked against a published proxy.pub.
     let (host_key, persisted) = ProxyServer::load_identity(&config.security.proxy_private_key)?;
     let host_key = Arc::new(host_key);
-    let audit_signer = if persisted {
-        Some(Arc::clone(&host_key))
+    // `audit_enabled = false` used to be ignored: the log was written anyway.
+    // With the log never initialised, every audit::log_* call is a no-op.
+    if config.security.audit_enabled {
+        let audit_signer = if persisted {
+            Some(Arc::clone(&host_key))
+        } else {
+            warn!("The audit log will not be signed: there is no persisted identity.");
+            None
+        };
+        let audit_log = audit::init_signed(
+            &config.security.audit_log,
+            audit_signer,
+            config.security.audit_checkpoint_events,
+        )?;
+        audit::log_startup(&config);
+        audit_log.spawn_checkpointer(Duration::from_secs(config.security.audit_checkpoint_secs));
     } else {
-        warn!("The audit log will not be signed: there is no persisted identity.");
-        None
-    };
-    let audit_log = audit::init_signed(
-        &config.security.audit_log,
-        audit_signer,
-        config.security.audit_checkpoint_events,
-    )?;
-    audit::log_startup(&config);
-    audit_log.spawn_checkpointer(Duration::from_secs(config.security.audit_checkpoint_secs));
+        warn!("Audit logging is disabled (audit_enabled = false): no control-plane events are recorded.");
+    }
 
     // Relay mode runs alongside the ETSI-014 gateway, not instead of it. A
     // deployment can front QKD key delivery, relay arbitrary TCP, or both.

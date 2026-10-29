@@ -190,9 +190,12 @@ fn spawn_relay(config: Arc<Config>) -> Result<()> {
 
 /// Check an audit log against the gateway's public bundle (`proxy.pub`).
 /// Usage: `--verify-audit-log <audit.log> [proxy.pub]`; the bundle defaults to
-/// `PQTG_IDENTITY_PUB`, then `/etc/pq-qkd-proxy/proxy.pub`. Exits 1 when a
-/// check fails. Events after the last checkpoint are reported, not failed:
-/// nothing has signed them yet.
+/// `PQTG_IDENTITY_PUB`, then `/etc/pq-qkd-proxy/proxy.pub`. Exits 0 when no
+/// check failed and every segment has a verified checkpoint, 1 when a check
+/// fails, and 2 when part of the log cannot be verified (a run without a
+/// persisted identity, a run with no checkpoint, or a file that starts
+/// mid-run). Events after a segment's last checkpoint are reported, not
+/// failed: nothing has signed them yet.
 fn verify_audit_log(args: &[String]) -> Result<()> {
     use crate::crypto::{FALCON_512_VK_LEN, SLH_DSA_SHAKE128F_VK_LEN};
     use std::io::BufReader;
@@ -221,6 +224,12 @@ fn verify_audit_log(args: &[String]) -> Result<()> {
         println!(
             "{} line(s) before the first segment use the older, unchained format and cannot be verified.",
             report.legacy_lines
+        );
+    }
+    if report.unanchored_lines > 0 {
+        println!(
+            "{} line(s) at the start belong to a run whose first line is missing and cannot be verified.",
+            report.unanchored_lines
         );
     }
     for (i, s) in report.segments.iter().enumerate() {
@@ -255,15 +264,28 @@ fn verify_audit_log(args: &[String]) -> Result<()> {
         }
         println!(".");
     }
-    if report.problems.is_empty() {
-        println!("Result: OK. Every check passed.");
-        Ok(())
-    } else {
-        println!("Result: FAILED, {} problem(s):", report.problems.len());
-        for p in &report.problems {
-            println!("  - {p}");
+    match report.verdict() {
+        audit::Verdict::Verified => {
+            println!(
+                "Result: OK. No check failed and every segment has a verified checkpoint. \
+                 Older-format lines and events after a segment's last checkpoint are not covered."
+            );
+            Ok(())
         }
-        std::process::exit(1);
+        audit::Verdict::NotVerified => {
+            println!("Result: NOT VERIFIED. No check failed, but nothing verifies:");
+            for r in report.unverified() {
+                println!("  - {r}");
+            }
+            std::process::exit(2);
+        }
+        audit::Verdict::Failed => {
+            println!("Result: FAILED, {} problem(s):", report.problems.len());
+            for p in &report.problems {
+                println!("  - {p}");
+            }
+            std::process::exit(1);
+        }
     }
 }
 

@@ -16,8 +16,13 @@ Until now the audit log was written as unsigned JSON lines, and
   with an ephemeral one the log is chained and marked unsigned.
 - A segment records a hash of the line before it, so a change to the end of
   an earlier run is caught too.
-- `pq-qkd-proxy --verify-audit-log <log> [proxy.pub]` checks a log and exits
-  1 if any check fails.
+- `pq-qkd-proxy --verify-audit-log <log> [proxy.pub]` checks a log. It exits
+  0 only when no check failed and every segment has a verified checkpoint, 1
+  when a check fails, and 2 when part of the log cannot be verified: a run
+  without a persisted identity, a run with no checkpoint, or a file that
+  starts mid-run. A chain without a signature proves nothing, since anyone
+  who can write the file can rebuild it. Rotate the log by renaming it, not
+  with `copytruncate`.
 - Every line now carries a `seq` field, and `segment_start` and `checkpoint`
   are new event types. Lines written by earlier versions are reported as
   legacy, not verified.

@@ -416,12 +416,74 @@ fn write_entry(event_type: &str, details: Value) {
 /// Result of [`verify_log`].
 #[derive(Debug, Default)]
 pub struct VerifyReport {
-    /// Lines before the first segment: written in the older, unchained
-    /// format, so there is nothing to verify.
+    /// Lines before the first segment written in the older, unchained
+    /// format: there is nothing to verify.
     pub legacy_lines: u64,
+    /// Lines with a `seq` but no `segment_start` before them: the start of
+    /// their run is missing (a copy made by `copytruncate`, or a cut file),
+    /// so they cannot be verified.
+    pub unanchored_lines: u64,
     pub segments: Vec<SegmentReport>,
-    /// Every check that failed. Empty means all checks passed.
+    /// Every check that failed. Empty means no check failed, which is not the
+    /// same as verified: see [`VerifyReport::verdict`].
     pub problems: Vec<String>,
+}
+
+/// The bottom line of a [`VerifyReport`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// No check failed and every segment has a verified checkpoint.
+    Verified,
+    /// No check failed, but part of the log could not be verified:
+    /// [`VerifyReport::unverified`] says which.
+    NotVerified,
+    /// A check failed: [`VerifyReport::problems`].
+    Failed,
+}
+
+impl VerifyReport {
+    pub fn verdict(&self) -> Verdict {
+        if !self.problems.is_empty() {
+            Verdict::Failed
+        } else if !self.unverified().is_empty() {
+            Verdict::NotVerified
+        } else {
+            Verdict::Verified
+        }
+    }
+
+    /// The parts of the log nothing verifies. A chain without a signature
+    /// proves nothing: anyone who can write the file can rebuild it.
+    pub fn unverified(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.segments.is_empty() {
+            out.push("the log has no segment in the signed format".to_string());
+        }
+        if self.unanchored_lines > 0 {
+            out.push(format!(
+                "{} line(s) at the start belong to a run whose first line is missing \
+                 (copied with copytruncate, or cut)",
+                self.unanchored_lines
+            ));
+        }
+        for (i, seg) in self.segments.iter().enumerate() {
+            if !seg.signed {
+                out.push(format!(
+                    "segment {} (line {}) was written without a persisted identity: \
+                     chained, not signed",
+                    i + 1,
+                    seg.first_line
+                ));
+            } else if seg.checkpoints == 0 {
+                out.push(format!(
+                    "segment {} (line {}) has no verified checkpoint",
+                    i + 1,
+                    seg.first_line
+                ));
+            }
+        }
+        out
+    }
 }
 
 #[derive(Debug)]
@@ -467,7 +529,8 @@ impl Segment {
 
 /// Check an audit log against the gateway's SLH-DSA-Shake128f verification
 /// key (the last 32 bytes of `proxy.pub`). `Err` only for read errors; every
-/// failed check goes into [`VerifyReport::problems`].
+/// failed check goes into [`VerifyReport::problems`], and
+/// [`VerifyReport::verdict`] gives the bottom line.
 pub fn verify_log<R: BufRead>(reader: R, slh_dsa_vk: &[u8]) -> Result<VerifyReport> {
     let mut report = VerifyReport::default();
     let mut current: Option<Segment> = None;
@@ -540,7 +603,11 @@ pub fn verify_log<R: BufRead>(reader: R, slh_dsa_vk: &[u8]) -> Result<VerifyRepo
 
         let Some(seg) = current.as_mut() else {
             if !starts_segment {
-                report.legacy_lines += 1;
+                if value.as_ref().and_then(|v| v.get("seq")).is_some() {
+                    report.unanchored_lines += 1;
+                } else {
+                    report.legacy_lines += 1;
+                }
             }
             prev_line = Some(line);
             continue;
@@ -728,6 +795,7 @@ mod tests {
         let (path, key) = signed_log();
         let r = verify(&path, &key);
         assert!(r.problems.is_empty(), "{:?}", r.problems);
+        assert_eq!(r.verdict(), Verdict::Verified);
         assert_eq!(r.legacy_lines, 0);
         assert_eq!(r.segments.len(), 1);
         let s = &r.segments[0];
@@ -1025,6 +1093,11 @@ mod tests {
         assert!(r.problems.is_empty(), "{:?}", r.problems);
         assert!(!r.segments[0].signed);
         assert_eq!(r.segments[0].checkpoints, 0);
+        assert_eq!(
+            r.verdict(),
+            Verdict::NotVerified,
+            "a chain alone proves nothing"
+        );
         std::fs::remove_file(path).ok();
     }
 
@@ -1039,6 +1112,67 @@ mod tests {
         let r = verify(&path, &key);
         assert!(r.problems.is_empty(), "{:?}", r.problems);
         assert_eq!(r.legacy_lines, 1);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn stripped_checkpoints_are_not_verified() {
+        // Without the key nobody can forge a checkpoint, but anyone can drop
+        // the checkpoints, renumber and rewrite the rest: the chain is not
+        // keyed. That must not read as verified.
+        let (path, key) = signed_log();
+        let rewritten: Vec<String> = lines(&path)
+            .iter()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .filter(|v| v["event_type"] != "checkpoint")
+            .enumerate()
+            .map(|(i, mut v)| {
+                v["seq"] = json!(i);
+                serde_json::to_string(&v)
+                    .unwrap()
+                    .replace("10.0.0.1", "10.0.0.9")
+            })
+            .collect();
+        write_lines(&path, &rewritten);
+        let r = verify(&path, &key);
+        assert!(r.problems.is_empty(), "{:?}", r.problems);
+        assert_eq!(r.verdict(), Verdict::NotVerified);
+        assert!(r.unverified()[0].contains("no verified checkpoint"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn unsigned_last_run_is_not_verified() {
+        let path = temp_log();
+        let key = Arc::new(PqKeyExchange::new().unwrap());
+        {
+            let log = AuditLog::open(&path, Some(Arc::clone(&key)), 1000).unwrap();
+            event(&log, 1);
+            log.checkpoint_now().unwrap();
+        }
+        {
+            let log = AuditLog::open(&path, None, 1000).unwrap();
+            event(&log, 2);
+        }
+        let r = verify(&path, &key);
+        assert!(r.problems.is_empty(), "{:?}", r.problems);
+        assert_eq!(r.verdict(), Verdict::NotVerified);
+        assert!(r.unverified()[0].contains("segment 2"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn file_starting_mid_run_is_not_verified() {
+        // What copytruncate leaves in the rotated-away copy's successor.
+        let (path, key) = signed_log();
+        let l = lines(&path);
+        write_lines(&path, &l[2..]);
+        let r = verify(&path, &key);
+        assert!(r.problems.is_empty(), "{:?}", r.problems);
+        assert_eq!(r.unanchored_lines, 5);
+        assert_eq!(r.legacy_lines, 0);
+        assert!(r.segments.is_empty());
+        assert_eq!(r.verdict(), Verdict::NotVerified);
         std::fs::remove_file(path).ok();
     }
 

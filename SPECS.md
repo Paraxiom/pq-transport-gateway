@@ -95,8 +95,11 @@ comes first, the gateway signs the chain head with its long-term
 SLH-DSA-Shake128f key in a `checkpoint` line of about 23 KB (a 17,088-byte
 signature in base64); an idle gateway writes none. Only a persisted identity
 signs: with an ephemeral one the log is chained and marked unsigned.
-`pq-qkd-proxy --verify-audit-log <log> [proxy.pub]` checks a log and exits 1
-if any check fails. Construction in `src/audit.rs`, vectors in
+`pq-qkd-proxy --verify-audit-log <log> [proxy.pub]` checks a log: exit 0
+when no check failed and every segment has a verified checkpoint, 1 when a
+check fails, 2 when part of the log cannot be verified (a run without a
+persisted identity, a run with no checkpoint, a file that starts mid-run).
+Rotate the log by renaming it, not with `copytruncate`. Construction in `src/audit.rs`, vectors in
 `tests/vectors/audit-v1.json`, limits in `docs/THREAT-MODEL.md` S4, T9.
 
 ### 2.6 Optional QKD-key-mix (protocol v3 only)

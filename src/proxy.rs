@@ -606,6 +606,7 @@ impl ProxyServer {
         mut stream: TcpStream,
         peer_addr: SocketAddr,
     ) -> Result<()> {
+        disable_nagle(&stream, &peer_addr);
         audit::log_connection(&peer_addr);
         let timeout = tokio::time::Duration::from_secs(self.config.proxy.connection_timeout);
         let (session, client_falcon_vk) =
@@ -842,10 +843,7 @@ impl ProxyServer {
             let encrypted_response =
                 session.sign_and_encrypt(&response_bytes, self.host_key.falcon_signing_key())?;
 
-            let len_bytes = (encrypted_response.len() as u32).to_be_bytes();
-            stream.write_all(&len_bytes).await?;
-            stream.write_all(&encrypted_response).await?;
-            stream.flush().await?;
+            write_frame(&mut stream, &encrypted_response).await?;
         }
         Ok(())
     }
@@ -893,18 +891,62 @@ async fn read_framed<T: for<'de> Deserialize<'de>>(
 }
 
 async fn write_framed<T: Serialize>(stream: &mut TcpStream, msg: &T) -> Result<()> {
-    let bytes = bincode::serialize(msg)?;
-    let len_bytes = (bytes.len() as u32).to_be_bytes();
-    stream.write_all(&len_bytes).await?;
-    stream.write_all(&bytes).await?;
+    write_frame(stream, &bincode::serialize(msg)?).await
+}
+
+/// Write one frame (`be32(len) ‖ payload`) in a single write. Written as two,
+/// the payload of a small frame waited for the ACK of the length prefix, which
+/// the client's delayed-ACK timer holds: about 40 ms per key request on Linux.
+async fn write_frame(stream: &mut TcpStream, payload: &[u8]) -> Result<()> {
+    let mut frame = Vec::with_capacity(4 + payload.len());
+    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(payload);
+    stream.write_all(&frame).await?;
     stream.flush().await?;
     Ok(())
+}
+
+/// Disable Nagle's algorithm on a gateway connection, as the relay does
+/// (`relay.rs::configure_socket`): every message is a small frame, and Nagle
+/// can hold one back until the client acknowledges the previous segment. Best
+/// effort: a socket that refuses still works, so a failure is only logged.
+fn disable_nagle(stream: &TcpStream, peer: &SocketAddr) {
+    if let Err(e) = stream.set_nodelay(true) {
+        warn!("could not disable Nagle on the connection from {peer}: {e}");
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::crypto::EphemeralKemKey;
+
+    async fn loopback_pair() -> (TcpStream, TcpStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move { listener.accept().await.unwrap().0 });
+        let client = TcpStream::connect(addr).await.unwrap();
+        (accept.await.unwrap(), client)
+    }
+
+    #[tokio::test]
+    async fn gateway_connections_disable_nagle() {
+        // With Nagle on, each key request took about 44 ms on Linux (the
+        // two-board kit, 2026-10-29) against about 2 ms on macOS.
+        let (server, _client) = loopback_pair().await;
+        disable_nagle(&server, &server.peer_addr().unwrap());
+        assert!(server.nodelay().unwrap(), "Nagle must be off");
+    }
+
+    #[tokio::test]
+    async fn a_frame_is_its_length_then_its_payload() {
+        let (mut server, mut client) = loopback_pair().await;
+        write_frame(&mut server, b"payload").await.unwrap();
+        let mut got = [0u8; 11];
+        client.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got[..4], &7u32.to_be_bytes());
+        assert_eq!(&got[4..], b"payload");
+    }
 
     /// End-to-end check of the type-state server handshake (previously the
     /// handshake path had no unit coverage). Drives the state machine the way

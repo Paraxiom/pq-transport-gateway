@@ -36,6 +36,17 @@ whoever controls the host can re-sign a forged log; events after the last
 checkpoint are unsigned until the next one; and removing the end of the
 file, its last checkpoint included, cannot be detected from the file alone.
 
+### Fixed
+
+- `audit_enabled = false` was ignored: the gateway wrote its audit log
+  anyway. It now writes none and warns at startup
+  (`tests/audit_enabled.rs`).
+- `docs/THREAT-MODEL.md` and `docs/CLIENT-INTEGRATION.md` linked issues
+  #1, #2, #3 and #7 of an earlier tracker; on this repository those numbers
+  are other pull requests and issues. The links are replaced by what they
+  referred to. Per-source DoS limits (S7, T11) are not yet tracked in a
+  public issue.
+
 ## 3.0.0 (2026-10-15)
 
 3.0.0 because the gateway's wire versions change: a 3.0.0 gateway and a 2.x

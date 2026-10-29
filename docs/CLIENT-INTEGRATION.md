@@ -4,8 +4,7 @@ This document describes what a PQTG client must implement to interoperate
 with the proxy. Aimed at integrators (KirQ engineers, third-party auditors,
 anyone porting PQTG into another stack).
 
-It also documents the **vk-pinning protocol** that closes issue
-[#2](https://github.com/Paraxiom/pq-transport-gateway/issues/2) — how
+It also documents the **vk-pinning protocol** — how
 clients verify they're talking to the *legitimate* PQTG server and not
 an attacker who has substituted their own Falcon vk.
 
@@ -58,7 +57,7 @@ v2 cannot tell the client which ETSI 014 key to fetch. Hybrid mode needs v3
    sent ("2.1", or "3.2" for v3). On mismatch → ABORT: an older gateway
    runs the old session layer (see §2.1), which is not compatible.
 
-5. ▸ VK PINNING (issue #2 mitigation) ◂
+5. ▸ VK PINNING ◂
    Compute: server_fp = SHA3-256("pqtg-identity-fingerprint-v1"
                                  ‖ len(falcon_vk) ‖ server_hello.falcon_vk
                                  ‖ len(slh_dsa_vk) ‖ server_hello.slh_dsa_vk)
@@ -224,8 +223,7 @@ byte-for-byte to ensure interoperability.
 ## 5. Authorized-keys mechanics (server enforces)
 
 The PQTG server validates the *client's* (`falcon_vk`, `slh_dsa_vk`) against
-its `/etc/pq-qkd-proxy/authorized_keys` file (issue
-[#1](https://github.com/Paraxiom/pq-transport-gateway/issues/1)). Clients
+its `/etc/pq-qkd-proxy/authorized_keys` file. Clients
 that aren't in the file are rejected before any keypair generation — this
 is fail-closed when the file is empty or missing.
 
@@ -246,7 +244,7 @@ operator-fingerprint distribution above (signed manifest, HSM, DNS, etc.).
 
 | Mistake                                                                 | Symptom                            |
 |-------------------------------------------------------------------------|------------------------------------|
-| Client skips the fingerprint check (step 5).                            | Vulnerable to TOFU MITM (issue #2).|
+| Client skips the fingerprint check (step 5).                            | Vulnerable to TOFU MITM.           |
 | Client skips the transcript-signature check (step 6).                   | Server identity not authenticated. |
 | Client reuses the ephemeral ML-KEM keypair across handshakes.           | Forward secrecy lost.              |
 | Client seals with `session_key` itself, or one key for both directions. | Nonce reuse against the gateway's frames; the gateway refuses the frame.|

@@ -3,9 +3,9 @@
 
 A second implementation of docs/KEY-SCHEDULE.md written from the document,
 not ported from src/kdf.rs. Uses only the standard library (hashlib SHA3-256
-and hmac). Rewrites kdf-domains.json, handshake-v3.json, relay-v4.json and
-gateway-session.json in this directory; `cargo test --test kdf_kat` checks the
-Rust code against them. handshake-v2.json is only read, as a cross-check of
+and hmac). Rewrites kdf-domains.json, handshake-v3.json, relay-v4.json,
+gateway-session.json and audit-v1.json in this directory; `cargo test --test
+kdf_kat` checks the Rust code against them. handshake-v2.json is only read, as a cross-check of
 the v2 session key this script recomputes from the flat v2 rule.
 
 The byte-pattern inputs below are not valid keys or ciphertexts, they are only
@@ -86,6 +86,10 @@ ALL = [
     ["relay", "v4", "key", "c2s"],
     ["relay", "v4", "key", "s2c"],
     ["relay", "v4", "ratchet"],
+    ["audit", "v1", "genesis"],
+    ["audit", "v1", "entry"],
+    ["audit", "v1", "checkpoint"],
+    ["audit", "v1", "tail"],
 ]
 D = {"/".join(p): domain(p) for p in ALL}
 assert len(set(D.values())) == len(D), "two paths share a constant"
@@ -303,4 +307,41 @@ dump(
         },
     },
 )
-print("wrote kdf-domains.json, handshake-v3.json, relay-v4.json, gateway-session.json")
+# --- audit log v1 (src/audit.rs) ----------------------------------------------
+# The chain runs over the exact bytes of each JSON line as written, without
+# its newline, so any byte string serves as a line here.
+log_id = bytes(range(0xC0, 0xE0))
+line0 = b'{"seq":0,"event_type":"segment_start"}'
+line1 = b'{"seq":1,"event_type":"connection"}'
+genesis = H(D["audit/v1/genesis"], [log_id])
+head0 = H(D["audit/v1/entry"], [genesis, line0])
+head1 = H(D["audit/v1/entry"], [head0, line1])
+checkpoint_msg = H(D["audit/v1/checkpoint"], [log_id, be64(1), head1])
+tail1 = H(D["audit/v1/tail"], [line1])
+
+dump(
+    "audit-v1.json",
+    {
+        "_about": ABOUT,
+        "inputs": {
+            "log_id": hx(log_id),
+            "line0": line0.decode(),
+            "line1": line1.decode(),
+            "through_seq": 1,
+        },
+        "expected": {
+            "genesis": hx(genesis),
+            "head0": hx(head0),
+            "head1": hx(head1),
+            "checkpoint_message": hx(checkpoint_msg),
+            "tail_of_line1": hx(tail1),
+        },
+        "rules": {
+            "genesis": "h_start = H(D[audit/v1/genesis], [log_id])",
+            "entry": "h_seq = H(D[audit/v1/entry], [h_prev, line_bytes]); line_bytes is the line as written, without its newline",
+            "checkpoint": "the gateway signs H(D[audit/v1/checkpoint], [log_id, be64(through_seq), h_through_seq]) with SLH-DSA-Shake128f",
+            "tail": "a segment_start records H(D[audit/v1/tail], [last line of the file before it]) as prev_tail",
+        },
+    },
+)
+print("wrote kdf-domains.json, handshake-v3.json, relay-v4.json, gateway-session.json, audit-v1.json")

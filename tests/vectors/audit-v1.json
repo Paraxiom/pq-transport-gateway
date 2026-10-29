@@ -1,0 +1,22 @@
+{
+  "_about": "Generated independently (Python hashlib SHA3-256 + hmac) from docs/KEY-SCHEDULE.md. Byte-pattern inputs are NOT valid keys, only hashed. Rust: tests/kdf_kat.rs.",
+  "inputs": {
+    "log_id": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+    "line0": "{\"seq\":0,\"event_type\":\"segment_start\"}",
+    "line1": "{\"seq\":1,\"event_type\":\"connection\"}",
+    "through_seq": 1
+  },
+  "expected": {
+    "genesis": "7969032b2f996dd02eaab6c59c235dc8974e9da10d1ab4b363a7966f7bb18e9d",
+    "head0": "42f74a8ea745722d6e916234ce3a8e6f3e81e6d71986b7d172660b1f864d3f35",
+    "head1": "f59017a069d334ecafa930f79a85f663b204c036b977d601c621cae325126eb8",
+    "checkpoint_message": "5388d6db4e4903bdbce52e752a06ad741f233eb990ee7f50cc568150d01a14af",
+    "tail_of_line1": "ed83b480d225e63a269c36f59f8bd3776e2f832a3a297a5933d79a3fbb0eff96"
+  },
+  "rules": {
+    "genesis": "h_start = H(D[audit/v1/genesis], [log_id])",
+    "entry": "h_seq = H(D[audit/v1/entry], [h_prev, line_bytes]); line_bytes is the line as written, without its newline",
+    "checkpoint": "the gateway signs H(D[audit/v1/checkpoint], [log_id, be64(through_seq), h_through_seq]) with SLH-DSA-Shake128f",
+    "tail": "a segment_start records H(D[audit/v1/tail], [last line of the file before it]) as prev_tail"
+  }
+}

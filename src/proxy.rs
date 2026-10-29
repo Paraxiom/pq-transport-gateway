@@ -544,9 +544,17 @@ impl ServerHandshake<HelloAcceptedV3> {
 }
 
 impl ProxyServer {
+    // Library API and tests; the binary calls `with_identity`.
+    #[allow(dead_code)]
     pub async fn new(config: Arc<Config>) -> Result<Self> {
+        let (host_key, _) = Self::load_identity(&config.security.proxy_private_key)?;
+        Self::with_identity(config, Arc::new(host_key)).await
+    }
+
+    /// Build the server around an identity the caller loaded, so the binary
+    /// shares one copy of the secret keys with the audit-log signer.
+    pub async fn with_identity(config: Arc<Config>, host_key: Arc<PqKeyExchange>) -> Result<Self> {
         let qkd_client = QkdClient::new(&config)?;
-        let host_key = Self::load_or_generate_identity(&config.security.proxy_private_key)?;
         let authenticator = Authenticator::new(&config)?;
         // The guard must remember a hello for the whole interval in which its
         // timestamp is acceptable: 2 × skew after first sight (see replay.rs).
@@ -558,21 +566,21 @@ impl ProxyServer {
             config,
             qkd_client: Arc::new(qkd_client),
             authenticator: Arc::new(authenticator),
-            host_key: Arc::new(host_key),
+            host_key,
             replay_guard,
         })
     }
 
-    /// Load the persisted identity file if present; otherwise generate a
-    /// fresh ephemeral identity and warn loudly. Production deployments
-    /// MUST run `--generate-keys` once to create a stable identity, since
-    /// regenerating on every start invalidates client-side vk pinning
-    /// (issue #2).
-    fn load_or_generate_identity(path: &str) -> Result<PqKeyExchange> {
+    /// Load the persisted identity file if present (`true`); otherwise
+    /// generate a fresh ephemeral identity and warn loudly (`false`).
+    /// Production deployments MUST run `--generate-keys` once to create a
+    /// stable identity, since regenerating on every start invalidates
+    /// client-side vk pinning (issue #2) and leaves the audit log unsigned.
+    pub fn load_identity(path: &str) -> Result<(PqKeyExchange, bool)> {
         match PqKeyExchange::load_if_present(path)? {
             Some(identity) => {
                 info!("Loaded persisted PQTG identity from {}", path);
-                Ok(identity)
+                Ok((identity, true))
             }
             None => {
                 warn!(
@@ -582,7 +590,7 @@ impl ProxyServer {
                      client vk pinning. Run `--generate-keys` to fix.",
                     path
                 );
-                PqKeyExchange::new()
+                Ok((PqKeyExchange::new()?, false))
             }
         }
     }

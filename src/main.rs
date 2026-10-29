@@ -3,6 +3,7 @@
 use anyhow::Result;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -28,6 +29,9 @@ async fn main() -> Result<()> {
     }
     if args.len() > 1 && args[1] == "--print-fingerprint" {
         return print_identity_fingerprint();
+    }
+    if args.len() > 1 && args[1] == "--verify-audit-log" {
+        return verify_audit_log(&args[2..]);
     }
 
     tracing_subscriber::registry()
@@ -59,8 +63,24 @@ async fn main() -> Result<()> {
         }
     }
 
-    audit::init(&config.security.audit_log)?;
+    // Load the identity once: the gateway and the audit-log signer share it.
+    // Only a persisted identity signs the log; signatures by an ephemeral key
+    // could never be checked against a published proxy.pub.
+    let (host_key, persisted) = ProxyServer::load_identity(&config.security.proxy_private_key)?;
+    let host_key = Arc::new(host_key);
+    let audit_signer = if persisted {
+        Some(Arc::clone(&host_key))
+    } else {
+        warn!("The audit log will not be signed: there is no persisted identity.");
+        None
+    };
+    let audit_log = audit::init_signed(
+        &config.security.audit_log,
+        audit_signer,
+        config.security.audit_checkpoint_events,
+    )?;
     audit::log_startup(&config);
+    audit_log.spawn_checkpointer(Duration::from_secs(config.security.audit_checkpoint_secs));
 
     // Relay mode runs alongside the ETSI-014 gateway, not instead of it. A
     // deployment can front QKD key delivery, relay arbitrary TCP, or both.
@@ -68,7 +88,7 @@ async fn main() -> Result<()> {
         spawn_relay(config.clone())?;
     }
 
-    let proxy = ProxyServer::new(config.clone()).await?;
+    let proxy = ProxyServer::with_identity(config.clone(), host_key).await?;
     let listener = TcpListener::bind(&config.proxy.listen).await?;
     info!("PQTG listening on {}", config.proxy.listen);
 
@@ -166,6 +186,85 @@ fn spawn_relay(config: Arc<Config>) -> Result<()> {
         ),
     }
     Ok(())
+}
+
+/// Check an audit log against the gateway's public bundle (`proxy.pub`).
+/// Usage: `--verify-audit-log <audit.log> [proxy.pub]`; the bundle defaults to
+/// `PQTG_IDENTITY_PUB`, then `/etc/pq-qkd-proxy/proxy.pub`. Exits 1 when a
+/// check fails. Events after the last checkpoint are reported, not failed:
+/// nothing has signed them yet.
+fn verify_audit_log(args: &[String]) -> Result<()> {
+    use crate::crypto::{FALCON_512_VK_LEN, SLH_DSA_SHAKE128F_VK_LEN};
+    use std::io::BufReader;
+
+    let log_path = args
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("usage: --verify-audit-log <audit.log> [proxy.pub]"))?;
+    let pub_path = args.get(1).cloned().unwrap_or_else(|| {
+        std::env::var("PQTG_IDENTITY_PUB")
+            .unwrap_or_else(|_| "/etc/pq-qkd-proxy/proxy.pub".to_string())
+    });
+    let bundle = std::fs::read(&pub_path)?;
+    if bundle.len() != FALCON_512_VK_LEN + SLH_DSA_SHAKE128F_VK_LEN {
+        anyhow::bail!(
+            "{pub_path} is not a PQTG public bundle ({} bytes, expected {})",
+            bundle.len(),
+            FALCON_512_VK_LEN + SLH_DSA_SHAKE128F_VK_LEN
+        );
+    }
+    let slh_dsa_vk = &bundle[FALCON_512_VK_LEN..];
+    let report = audit::verify_log(BufReader::new(std::fs::File::open(log_path)?), slh_dsa_vk)?;
+
+    println!("Audit log:  {log_path}");
+    println!("Key:        {pub_path}");
+    if report.legacy_lines > 0 {
+        println!(
+            "{} line(s) before the first segment use the older, unchained format and cannot be verified.",
+            report.legacy_lines
+        );
+    }
+    for (i, s) in report.segments.iter().enumerate() {
+        let id = &s.log_id[..12];
+        print!(
+            "Segment {} (line {}, log {id}…): {} line(s); ",
+            i + 1,
+            s.first_line,
+            s.lines
+        );
+        if !s.signed {
+            println!(
+                "written without a persisted identity: chained, not signed, nothing verified."
+            );
+            continue;
+        }
+        match s.signed_through {
+            Some(seq) => print!(
+                "{} checkpoint(s) verified, signed through seq {seq}",
+                s.checkpoints
+            ),
+            None => print!("no verified checkpoint"),
+        }
+        if let Some(line) = s.broken_at {
+            print!("; chain broken at line {line}, nothing after it checked");
+        }
+        if s.unsigned_events > 0 {
+            print!(
+                "; {} event(s) after the last checkpoint are not signed",
+                s.unsigned_events
+            );
+        }
+        println!(".");
+    }
+    if report.problems.is_empty() {
+        println!("Result: OK. Every check passed.");
+        Ok(())
+    } else {
+        println!("Result: FAILED, {} problem(s):", report.problems.len());
+        for p in &report.problems {
+            println!("  - {p}");
+        }
+        std::process::exit(1);
+    }
 }
 
 /// Print the identity fingerprint for vk pinning (issue #2).

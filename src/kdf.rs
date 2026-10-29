@@ -80,6 +80,10 @@ pub const ALL_DOMAINS: &[&[&str]] = &[
     &["relay", "v4", "key", "c2s"],
     &["relay", "v4", "key", "s2c"],
     &["relay", "v4", "ratchet"],
+    &["audit", "v1", "genesis"],
+    &["audit", "v1", "entry"],
+    &["audit", "v1", "checkpoint"],
+    &["audit", "v1", "tail"],
 ];
 
 macro_rules! domains {
@@ -105,6 +109,10 @@ domains! {
     RELAY_KEY_C2S             = ["relay", "v4", "key", "c2s"];
     RELAY_KEY_S2C             = ["relay", "v4", "key", "s2c"];
     RELAY_RATCHET             = ["relay", "v4", "ratchet"];
+    AUDIT_V1_GENESIS          = ["audit", "v1", "genesis"];
+    AUDIT_V1_ENTRY            = ["audit", "v1", "entry"];
+    AUDIT_V1_CHECKPOINT       = ["audit", "v1", "checkpoint"];
+    AUDIT_V1_TAIL             = ["audit", "v1", "tail"];
 }
 
 /// Domain-separated hash of public data: `SHA3-256(D ‖ len32(p1) ‖ p1 ‖ …)`.

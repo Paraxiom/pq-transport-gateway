@@ -87,10 +87,17 @@ Error responses per spec §5.3 (`400` / `401` / `503` with structured
 ### 2.5 Audit trail
 
 Control-plane events (connection, key request, QKD key use, refused
-client) are appended to a JSON-lines log. The entries are not signed: an
-SLH-DSA-Shake128f signing path exists (`PqKeyExchange::sign_hash_based`)
-but is not wired to the log, and no verification tool ships in this
-repository (`docs/THREAT-MODEL.md` S4, T9).
+client) are appended to a JSON-lines log. Each gateway run starts a segment
+(`segment_start`, with a random `log_id`) whose lines form a hash chain over
+their exact bytes. After `security.audit_checkpoint_events` events (default
+1000) or `security.audit_checkpoint_secs` seconds (default 300), whichever
+comes first, the gateway signs the chain head with its long-term
+SLH-DSA-Shake128f key in a `checkpoint` line of about 23 KB (a 17,088-byte
+signature in base64); an idle gateway writes none. Only a persisted identity
+signs: with an ephemeral one the log is chained and marked unsigned.
+`pq-qkd-proxy --verify-audit-log <log> [proxy.pub]` checks a log and exits 1
+if any check fails. Construction in `src/audit.rs`, vectors in
+`tests/vectors/audit-v1.json`, limits in `docs/THREAT-MODEL.md` S4, T9.
 
 ### 2.6 Optional QKD-key-mix (protocol v3 only)
 
@@ -110,6 +117,7 @@ security of the QKD key. Protocol v2 never mixes a QKD key.
 | Long-term identity sig    | Falcon-512             | FIPS 206 (pending) | paraxiom-pqc   |
 | Ephemeral KEM             | ML-KEM-768             | FIPS 203           | paraxiom-pqc   |
 | Second client key (allow-list only, signs nothing) | SLH-DSA-Shake128f | FIPS 205 | paraxiom-pqc |
+| Audit-log checkpoints (gateway identity key) | SLH-DSA-Shake128f | FIPS 205 | paraxiom-pqc |
 | Transcript hash           | SHA3-256               | FIPS 202           | sha3 crate     |
 | Session key derivation    | SHA3-256 over labels (v2); HMAC-SHA3-256 keyed chain (v3); HMAC-SHA3-256 PRF for the per-direction keys | FIPS 202, RFC 2104 | sha3 + hmac crates; `docs/KEY-SCHEDULE.md` |
 | AEAD                      | AES-256-GCM            | NIST SP 800-38D    | aes-gcm crate  |
@@ -136,6 +144,8 @@ Key parameters:
 | `identity.slh_dsa_keypath`| path      | —              | Long-term SLH-DSA-Shake128f audit signing key             |
 | `authorized_keys`        | path       | —              | Allowed client Falcon public keys                         |
 | `audit.log_path`         | path       | —              | Append-only audit-trail log                               |
+| `security.audit_checkpoint_events` | integer | `1000` | Events between signed audit checkpoints            |
+| `security.audit_checkpoint_secs`   | integer | `300`  | Longest time audit events stay unsigned            |
 | `qkd_mix.enabled`        | bool       | `false`        | Enable QKD-key-mix path                                   |
 
 ---
@@ -153,7 +163,10 @@ Resource profile (single-instance, moderate load):
 
 - RSS: < 100 MB steady-state
 - CPU: bursts to one core during handshake; idle otherwise
-- Storage: < 50 MB binary, audit log grows ~1 KB per request
+- Storage: < 50 MB binary, audit log grows ~1 KB per request, plus a ~23 KB
+  checkpoint per 1000 events or per 300 s with activity (defaults): at most
+  ~6.6 MB a day from the timer, and about 2 % on top of the per-event growth
+  from the event count
 - Network: per-handshake ~3 KB; per-request <500 B + payload
 
 Numbers above are estimates pending the `PERFORMANCE-VALIDATION-PLAN-2026-05-24`
@@ -236,9 +249,8 @@ Production-readiness gaps tracked in `TODO.md`:
   Phase 2.3 of the KirQ roadmap.
 - **No multi-host clustering** — single instance only. Horizontal
   scaling is a Phase 3 question.
-- **Dead-code warnings** — `EphemeralKemKey`, `verify_slh_dsa`,
-  `sign_hash_based` are intentional client-side API surface that the
-  current server binary doesn't exercise.
+- **Dead-code warnings** — `EphemeralKemKey` is intentional client-side
+  API surface that the current server binary doesn't exercise.
 
 ---
 

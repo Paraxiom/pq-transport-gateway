@@ -166,10 +166,11 @@ Resource profile (single-instance, moderate load):
 
 - RSS: < 100 MB steady-state
 - CPU: bursts to one core during handshake; idle otherwise
-- Storage: < 50 MB binary, audit log grows ~1 KB per request, plus a ~23 KB
-  checkpoint per 1000 events or per 300 s with activity (defaults): at most
-  ~6.6 MB a day from the timer, and about 2 % on top of the per-event growth
-  from the event count
+- Storage: < 50 MB binary. The audit log grows about 150 bytes per event
+  (148 B mean on a loopback run, 2026-10-29), plus a ~23 KB checkpoint per
+  1000 events or per 300 s with activity (defaults): at most ~6.6 MB a day
+  from the timer, and about 15 % on top of the event lines from the event
+  count
 - Network: per-handshake ~3 KB; per-request <500 B + payload
 
 Numbers above are estimates pending the `PERFORMANCE-VALIDATION-PLAN-2026-05-24`

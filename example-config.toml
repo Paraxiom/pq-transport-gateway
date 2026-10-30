@@ -59,6 +59,13 @@ audit_enabled = true
 # Audit log path
 audit_log = "/var/log/pq-qkd-proxy/audit.log"
 
+# Signed checkpoints: the gateway signs the audit log's hash chain after this
+# many events, or after this many seconds, whichever comes first. Each
+# checkpoint line is about 23 KB. Needs a persisted identity (--generate-keys);
+# verify with --verify-audit-log.
+audit_checkpoint_events = 1000
+audit_checkpoint_secs = 300
+
 # Key rotation interval in hours
 key_rotation_hours = 24
 

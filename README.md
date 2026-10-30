@@ -41,6 +41,7 @@ below go through **[paraxiom-pqc](https://github.com/Paraxiom/paraxiom-pqc)** (p
 | Key encapsulation| ML-KEM-768                 | FIPS 203       |
 | Handshake sig.   | Falcon-512                 | FIPS 206 (pending) |
 | Second client key| SLH-DSA-Shake128f (allow-list match only, signs nothing) | FIPS 205 |
+| Audit checkpoints| SLH-DSA-Shake128f (the gateway's own identity key) | FIPS 205 |
 | AEAD             | AES-256-GCM                | NIST SP 800-38D |
 | Transcript / KDF | SHA3-256                   | FIPS 202       |
 
@@ -91,6 +92,9 @@ git clone https://github.com/Paraxiom/pq-transport-gateway
 cd pq-transport-gateway
 cargo build --release
 sudo ./target/release/pq-qkd-proxy --generate-keys
+
+# Later: check the audit log against the gateway's public bundle
+./target/release/pq-qkd-proxy --verify-audit-log /var/log/pq-qkd-proxy/audit.log /etc/pq-qkd-proxy/proxy.pub
 ```
 
 ## Configuration
@@ -126,8 +130,11 @@ falcon512+slh-dsa-shake128f <base64(falcon_vk(897) || slh_dsa_vk(32))> perm=read
 - **Authenticated key agreement**: server signs the full handshake transcript
 - **Forward secrecy**: ephemeral ML-KEM keypair per handshake
 - **Audit logging**: connections, key requests, QKD key use and refused clients are
-  appended to a JSON-lines log. The entries are not signed: an SLH-DSA signing function
-  exists (`PqKeyExchange::sign_hash_based`) but is not wired to the log
+  appended to a JSON-lines log. Each run's lines are hash-chained, and the gateway signs
+  the chain with its SLH-DSA-Shake128f key every `audit_checkpoint_events` events or
+  `audit_checkpoint_secs` seconds; `--verify-audit-log` checks a log. The key is a file
+  on the same host, so this catches changes made without it, not by whoever controls the
+  host, and events after the last checkpoint are not signed yet (`docs/THREAT-MODEL.md` T9)
 - **Standards status**: Falcon-512 (FN-DSA, FIPS 206) is still a draft standard, and it is
   the only signature algorithm the protocol uses (server transcript, v3 client hello,
   per-frame signatures). Clients also present an SLH-DSA-Shake128f (FIPS 205) key, but it

@@ -1,6 +1,7 @@
 //! Audit-trail micro-benchmarks: SLH-DSA-Shake128f signature/verification
-//! cost per audit log line. Quantifies the per-event cost of T9
-//! (audit-log integrity) in `docs/THREAT-MODEL.md`.
+//! cost. The audit log signs one checkpoint per `audit_checkpoint_events`
+//! events or `audit_checkpoint_secs` seconds, not every line, so this is the
+//! cost per checkpoint (T9 in `docs/THREAT-MODEL.md`).
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use pq_qkd_proxy::crypto::PqKeyExchange;

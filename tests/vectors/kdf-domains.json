@@ -18,6 +18,10 @@
     "relay/v4/transcript": "f545e7dd538e19a8d3975faef63c79623a011cef58350d5bc05eef3950a593f3",
     "relay/v4/key/c2s": "b4bc32c3ef4d12d41285fe33fcca93c4e680dda3ce78d87a6254766db7beffb8",
     "relay/v4/key/s2c": "19248e6c3e9f2891a1ccbece8eaa7361dc2333161ac09a8e44430a1b6df76fc9",
-    "relay/v4/ratchet": "3ba15e4fd162c9eef27a7880f250cc990ab9e0edf5ec2fcec01db79678df1ef4"
+    "relay/v4/ratchet": "3ba15e4fd162c9eef27a7880f250cc990ab9e0edf5ec2fcec01db79678df1ef4",
+    "audit/v1/genesis": "a3980c94903eb5bb4fbad08b753441ce55ea85ef53f3840fee0c45421b5d34a0",
+    "audit/v1/entry": "c5478218e5fcfb1c2b1d272dfa0cedab86236b896d8cab395f588f25f2b2fb4a",
+    "audit/v1/checkpoint": "a90f7b8cc9185b6b0fd6288fca738783cc51137d18baa140d3ed1be245287cb4",
+    "audit/v1/tail": "f4ab2e748a22e0c27f4a52e2136f657d600084e69937ac2ce1d52a25450a2945"
   }
 }

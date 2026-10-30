@@ -51,6 +51,10 @@ test, and published with its constant in `tests/vectors/kdf-domains.json`:
 | `relay/v4/transcript` | relay transcript, signed by the server |
 | `relay/v4/key/c2s`, `relay/v4/key/s2c` | directional record keys |
 | `relay/v4/ratchet` | one record-layer ratchet step |
+| `audit/v1/genesis` | start of an audit-log segment's chain (`src/audit.rs`) |
+| `audit/v1/entry` | audit-log chain step over one line |
+| `audit/v1/checkpoint` | the message an audit checkpoint signs |
+| `audit/v1/tail` | a segment's link to the line before it |
 
 Adding a domain means adding a path to the registry and a line to the
 vectors; nothing else is shared.

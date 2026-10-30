@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+### Signed audit log (issue #9)
+
+Until now the audit log was written as unsigned JSON lines, and
+`docs/THREAT-MODEL.md` listed tampering with it (T9) as not mitigated.
+
+- Each gateway run starts a segment (`segment_start`, with a random
+  `log_id`), and its lines form a hash chain over their exact bytes.
+- After `audit_checkpoint_events` events (default 1000) or
+  `audit_checkpoint_secs` seconds (default 300), the gateway signs the chain
+  head with its SLH-DSA-Shake128f identity key in a `checkpoint` line of
+  about 23 KB. An idle gateway writes none. Only a persisted identity signs;
+  with an ephemeral one the log is chained and marked unsigned.
+- A segment records a hash of the line before it, so a change to the end of
+  an earlier run is caught too.
+- `pq-qkd-proxy --verify-audit-log <log> [proxy.pub]` checks a log. It exits
+  0 only when no check failed and every segment has a verified checkpoint, 1
+  when a check fails, and 2 when part of the log cannot be verified: a run
+  without a persisted identity, a run with no checkpoint, or a file that
+  starts mid-run. A chain without a signature proves nothing, since anyone
+  who can write the file can rebuild it. Rotate the log by renaming it, not
+  with `copytruncate`.
+- Every line now carries a `seq` field, and `segment_start` and `checkpoint`
+  are new event types. Lines written by earlier versions are reported as
+  legacy, not verified.
+- New domains `audit/v1/{genesis,entry,checkpoint,tail}`, with vectors in
+  `tests/vectors/audit-v1.json` from the independent Python generator.
+- Library: `ProxyServer::with_identity`, `ProxyServer::load_identity`,
+  `audit::init_signed` and `audit::AuditLog`.
+
+T9 is now "Detected, with limits": the key is a file on the same host, so
+whoever controls the host can re-sign a forged log; events after the last
+checkpoint are unsigned until the next one; and removing the end of the
+file, its last checkpoint included, cannot be detected from the file alone.
+
 ## 3.0.0 (2026-10-15)
 
 3.0.0 because the gateway's wire versions change: a 3.0.0 gateway and a 2.x

@@ -4,8 +4,7 @@
 //! - ML-KEM-768 (FIPS 203) for the actual key encapsulation / shared-secret derivation
 //! - Falcon-512 (pending FIPS 206) for compact handshake signatures
 //! - SLH-DSA-Shake128f (FIPS 205): a second identity key, allow-listed with the
-//!   Falcon key; it signs nothing today (an audit-trail signing path exists but
-//!   is not wired to the audit log)
+//!   Falcon key; it signs the audit log's checkpoints (`src/audit.rs`)
 //! - AES-256-GCM for the symmetric session
 //! - SHA3-256 for transcript hashing and key mixing
 //!
@@ -149,11 +148,8 @@ impl PqKeyExchange {
         Ok(sig.bytes)
     }
 
-    /// Sign with the long-lived SLH-DSA key. Meant for audit-log integrity
-    /// (issue #9, THREAT-MODEL S4/T9) but not wired: only tests and
-    /// `benches/audit.rs` call it, and the audit log is written unsigned.
-    /// `#[allow(dead_code)]` for that reason.
-    #[allow(dead_code)]
+    /// Sign with the long-lived SLH-DSA key: the audit log's checkpoints
+    /// (`src/audit.rs`; issue #9, THREAT-MODEL S4/T9).
     pub fn sign_hash_based(&self, msg: &[u8]) -> Result<Vec<u8>> {
         let sig = sign::sign(&self.hash_sk, msg).map_err(|e| anyhow!("SLH-DSA sign: {e:?}"))?;
         Ok(sig.bytes)
@@ -171,9 +167,8 @@ impl PqKeyExchange {
         sign::verify(&vk, msg, &sig).map_err(|e| anyhow!("Falcon verify: {e:?}"))
     }
 
-    /// Verify an SLH-DSA signature, for a future audit-log reader. Nothing
-    /// outside tests and benches calls it, hence the `#[allow(dead_code)]`.
-    #[allow(dead_code)]
+    /// Verify an SLH-DSA signature: audit-log checkpoints
+    /// (`audit::verify_log`, `--verify-audit-log`).
     pub fn verify_slh_dsa(msg: &[u8], sig_bytes: &[u8], vk_bytes: &[u8]) -> Result<bool> {
         let vk = VerificationKey {
             algorithm: HASH_ALG,

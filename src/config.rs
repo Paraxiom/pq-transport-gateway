@@ -121,6 +121,17 @@ pub struct SecurityConfig {
     #[serde(default = "default_audit_log")]
     pub audit_log: String,
 
+    /// Write a signed checkpoint after this many audit events, or sooner when
+    /// `audit_checkpoint_secs` elapses (see `src/audit.rs`). Each checkpoint
+    /// line carries a ~17 KB SLH-DSA-Shake128f signature (~23 KB as base64).
+    #[serde(default = "default_audit_checkpoint_events")]
+    pub audit_checkpoint_events: u64,
+
+    /// Longest time, in seconds, that audit events stay unsigned. A gateway
+    /// with no new events writes no checkpoint, so an idle log does not grow.
+    #[serde(default = "default_audit_checkpoint_secs")]
+    pub audit_checkpoint_secs: u64,
+
     /// Key rotation interval in hours
     #[serde(default = "default_key_rotation_hours")]
     pub key_rotation_hours: u64,
@@ -351,6 +362,10 @@ impl Config {
             ),
         }
 
+        if self.security.audit_checkpoint_events == 0 || self.security.audit_checkpoint_secs == 0 {
+            anyhow::bail!("audit_checkpoint_events and audit_checkpoint_secs must be at least 1");
+        }
+
         // Check paths exist
         if !Path::new(&self.security.authorized_keys).exists() {
             anyhow::bail!(
@@ -475,6 +490,8 @@ impl Default for Config {
                 proxy_certificate: "/etc/pq-qkd-proxy/proxy.cert".to_string(),
                 audit_enabled: default_audit_enabled(),
                 audit_log: default_audit_log(),
+                audit_checkpoint_events: default_audit_checkpoint_events(),
+                audit_checkpoint_secs: default_audit_checkpoint_secs(),
                 key_rotation_hours: default_key_rotation_hours(),
             },
             performance: PerformanceConfig::default(),
@@ -535,6 +552,12 @@ fn default_audit_enabled() -> bool {
 }
 fn default_audit_log() -> String {
     "/var/log/pq-qkd-proxy/audit.log".to_string()
+}
+fn default_audit_checkpoint_events() -> u64 {
+    1000
+}
+fn default_audit_checkpoint_secs() -> u64 {
+    300
 }
 fn default_key_rotation_hours() -> u64 {
     24

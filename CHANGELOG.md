@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Input checks on the key manager side (2026-11-11)
+
+- **SAE IDs are restricted.** An SAE ID becomes a path segment of the key
+  manager URL (`/api/v1/keys/{SAE_ID}/...`). It is now limited to ASCII
+  letters, digits and `-`, `_`, `.`, `:`, at most 256 bytes, and may not be
+  `.` or `..`. It is checked in the configuration, when a v3 hello arrives
+  (a malformed one refuses the hello; it no longer falls back to PqcOnly),
+  and before each key manager URL is built. A deployment whose SAE IDs use
+  other characters must be checked before upgrading: the gateway refuses
+  them with a clear error.
+- **The "vendor API on localhost" check parses the URL.** The host must be
+  `localhost`, an address in 127.0.0.0/8, or `::1`. The earlier check looked
+  for the text "localhost" anywhere in the string. A URL with a user name or
+  password is refused.
+- **paraxiom-pqc 0.2.1** (lock file only), which brings ml-kem 0.3.3.
+
 ### Signed audit log (issue #9)
 
 Until now the audit log was written as unsigned JSON lines, and

@@ -340,13 +340,15 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         self.relay.validate()?;
 
-        // Ensure vendor API is localhost only
-        if !self.qkd.vendor_api.contains("localhost")
-            && !self.qkd.vendor_api.contains("127.0.0.1")
-            && !self.qkd.vendor_api.contains("::1")
-        {
-            anyhow::bail!("QKD vendor API must be on localhost for security");
-        }
+        // The vendor API must be on this machine: its TLS is the classical
+        // link the gateway exists to keep off the network.
+        check_vendor_api_is_loopback(&self.qkd.vendor_api)?;
+
+        // SAE IDs become a path segment of the key manager URL.
+        crate::qkd_client::validate_sae_id(&self.qkd.default_slave_sae_id)
+            .context("qkd.default_slave_sae_id")?;
+        crate::qkd_client::validate_sae_id(&self.qkd.default_master_sae_id)
+            .context("qkd.default_master_sae_id")?;
 
         // Validate algorithms
         match self.security.pq_algorithm.as_str() {
@@ -532,6 +534,45 @@ fn default_key_timeout() -> u64 {
 fn default_max_key_size() -> usize {
     1024 * 1024
 } // 1MB
+/// Refuse a vendor API URL whose host is not this machine.
+///
+/// The URL is parsed and its host compared: the name `localhost`, an IPv4
+/// address in 127.0.0.0/8, or `::1`. A substring test is not enough:
+/// `https://localhost.example.net` and `https://example.net/?localhost`
+/// both contain "localhost" and both leave the machine.
+///
+/// `localhost` is resolved by the operating system. A hosts file that maps
+/// it elsewhere is outside what this check can see.
+pub fn check_vendor_api_is_loopback(vendor_api: &str) -> Result<()> {
+    let url = reqwest::Url::parse(vendor_api)
+        .with_context(|| format!("qkd.vendor_api is not a URL: {vendor_api:?}"))?;
+    match url.scheme() {
+        "https" | "http" => {}
+        other => anyhow::bail!("qkd.vendor_api scheme must be https or http, got {other:?}"),
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        anyhow::bail!("qkd.vendor_api must not carry a user name or password");
+    }
+    // host_str gives an IPv6 address in brackets; IpAddr parses it without.
+    let local = match url.host_str() {
+        Some(host) if host.eq_ignore_ascii_case("localhost") => true,
+        Some(host) => host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false),
+        None => false,
+    };
+    if !local {
+        anyhow::bail!(
+            "QKD vendor API must be on localhost for security (host of {vendor_api:?} is not \
+             localhost, 127.0.0.0/8 or ::1)"
+        );
+    }
+    Ok(())
+}
+
 fn default_slave_sae_id() -> String {
     "default-slave".to_string()
 }
@@ -578,6 +619,52 @@ fn default_cache_ttl() -> u64 {
 #[cfg(test)]
 mod allowlist_and_relay_tests {
     use super::*;
+
+    #[test]
+    fn vendor_api_on_this_machine_is_accepted() {
+        for ok in [
+            "https://localhost:443",
+            "https://LOCALHOST:8080/",
+            "http://127.0.0.1:8080",
+            "https://127.5.6.7",
+            "https://[::1]:8443/api",
+        ] {
+            check_vendor_api_is_loopback(ok).unwrap_or_else(|e| panic!("{ok:?} refused: {e}"));
+        }
+    }
+
+    #[test]
+    fn vendor_api_elsewhere_is_refused() {
+        for bad in [
+            "https://localhost.example.net",
+            "https://example.net/?localhost",
+            "https://example.net/127.0.0.1",
+            "https://127.0.0.1.example.net",
+            "https://localhost@example.net",
+            "https://user:pw@localhost",
+            "https://10.0.0.1",
+            "https://[::ffff:10.0.0.1]",
+            "ftp://localhost",
+            "localhost:443",
+            "not a url",
+            "",
+        ] {
+            assert!(
+                check_vendor_api_is_loopback(bad).is_err(),
+                "{bad:?} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn config_refuses_a_default_sae_id_that_could_steer_the_url() {
+        let mut c = Config::default();
+        c.qkd.default_slave_sae_id = "../status".to_string();
+        assert!(c.validate().is_err());
+        let mut c = Config::default();
+        c.qkd.default_master_sae_id = "a?b".to_string();
+        assert!(c.validate().is_err());
+    }
 
     /// A config written before the [relay] section existed must still parse,
     /// with the relay off. If this breaks, every deployed gateway fails to

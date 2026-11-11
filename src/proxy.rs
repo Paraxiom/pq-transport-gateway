@@ -310,7 +310,7 @@ const MAX_HELLO_BYTES: usize = 16 * 1024;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 /// Sanity cap on the client-supplied SAE-ID (ETSI 014 SAE_IDs are short
 /// logical labels; anything longer is malformed or hostile).
-const MAX_SAE_ID_BYTES: usize = 256;
+use crate::qkd_client::MAX_SAE_ID_BYTES;
 
 // ── Type-state server handshake ─────────────────────────────────────────────
 //
@@ -739,6 +739,14 @@ impl ProxyServer {
                 client_hello.client_sae_id.len(),
                 MAX_SAE_ID_BYTES
             ));
+        }
+        // An empty SAE ID means "no QKD". Any other value will become a path
+        // segment of the key manager URL, so a malformed one refuses the
+        // hello here. It must not reach the key manager, and it must not
+        // turn into a quiet PqcOnly fallback.
+        if !client_hello.client_sae_id.is_empty() {
+            crate::qkd_client::validate_sae_id(&client_hello.client_sae_id)
+                .map_err(|e| anyhow!("ClientHello.client_sae_id refused: {e}"))?;
         }
         self.validate_and_authorize(
             &client_hello.kem_ek,

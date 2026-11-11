@@ -27,7 +27,7 @@ path = "src/lib.rs"
 # checks the Falcon degree against the key's label; fuzz/ inherits it through
 # the path dependency and kani/ names the same version. See
 # docs/THREAT-MODEL.md (A10).
-paraxiom-pqc = "0.2"
+paraxiom-pqc = "0.2.1"
 
 # Transitive versions are resolved from the vendored ml-dsa/slh-dsa forks.
 

@@ -29,6 +29,44 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 use zeroize::Zeroizing;
 
+/// Longest SAE ID accepted, in bytes.
+pub const MAX_SAE_ID_BYTES: usize = 256;
+
+/// Check an SAE ID before it is placed in a key manager URL.
+///
+/// An SAE ID becomes one path segment of
+/// `/api/v1/keys/{SAE_ID}/...`, and the request carries the key manager
+/// credentials. A client must not be able to steer that request to another
+/// path, so the ID is limited to ASCII letters, digits and `-`, `_`, `.`,
+/// `:`. That leaves out `/`, `\`, `?`, `#`, `%`, spaces and control
+/// characters. The dot segments `.` and `..` are refused as well.
+///
+/// ETSI GS QKD 014 does not fix a character set for SAE IDs. An ID outside
+/// this set is refused here with a clear error and never sent on.
+pub fn validate_sae_id(sae_id: &str) -> Result<()> {
+    if sae_id.is_empty() {
+        return Err(anyhow!("SAE ID is empty"));
+    }
+    if sae_id.len() > MAX_SAE_ID_BYTES {
+        return Err(anyhow!(
+            "SAE ID too long: {} bytes (max {MAX_SAE_ID_BYTES})",
+            sae_id.len()
+        ));
+    }
+    if sae_id == "." || sae_id == ".." {
+        return Err(anyhow!("SAE ID must not be a dot segment"));
+    }
+    if let Some(bad) = sae_id
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':')))
+    {
+        return Err(anyhow!(
+            "SAE ID contains {bad:?}; allowed: ASCII letters, digits, '-', '_', '.', ':'"
+        ));
+    }
+    Ok(())
+}
+
 // ── ETSI 014 v1.1.1 §5.1 Status object ──────────────────────────────────────
 
 /// Status response: `GET /api/v1/keys/{slave_SAE_ID}/status`.
@@ -245,6 +283,7 @@ impl QkdClient {
 
     /// `GET /api/v1/keys/{slave_SAE_ID}/status`.
     pub async fn status(&self, slave_sae_id: &str) -> Result<Status> {
+        validate_sae_id(slave_sae_id)?;
         let url = format!(
             "{}/api/v1/keys/{}/status",
             self.base_url.trim_end_matches('/'),
@@ -269,6 +308,7 @@ impl QkdClient {
         slave_sae_id: &str,
         request: &EncKeysRequest,
     ) -> Result<KeyContainer> {
+        validate_sae_id(slave_sae_id)?;
         let url = format!(
             "{}/api/v1/keys/{}/enc_keys",
             self.base_url.trim_end_matches('/'),
@@ -288,6 +328,7 @@ impl QkdClient {
         master_sae_id: &str,
         request: &DecKeysRequest,
     ) -> Result<KeyContainer> {
+        validate_sae_id(master_sae_id)?;
         let url = format!(
             "{}/api/v1/keys/{}/dec_keys",
             self.base_url.trim_end_matches('/'),
@@ -380,6 +421,44 @@ impl QkdClient {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn sae_id_accepts_ordinary_labels() {
+        for ok in [
+            "sae-b",
+            "SAE_A",
+            "sae.102",
+            "site1:app2",
+            "a",
+            &"x".repeat(MAX_SAE_ID_BYTES),
+        ] {
+            super::validate_sae_id(ok).unwrap_or_else(|e| panic!("{ok:?} refused: {e}"));
+        }
+    }
+
+    #[test]
+    fn sae_id_refuses_anything_that_could_steer_the_url() {
+        let too_long = "x".repeat(MAX_SAE_ID_BYTES + 1);
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../status",
+            "a/b",
+            "a\\b",
+            "a?x=1",
+            "a#frag",
+            "a%2e%2e",
+            "a b",
+            "a\nb",
+            "a\u{0}b",
+            "sa\u{e9}",
+            "a@b",
+            too_long.as_str(),
+        ] {
+            assert!(super::validate_sae_id(bad).is_err(), "{bad:?} was accepted");
+        }
+    }
     use super::*;
 
     #[test]

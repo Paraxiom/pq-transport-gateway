@@ -4,9 +4,11 @@ A security gateway that replaces vulnerable classical TLS with post-quantum
 cryptography for QKD infrastructure, protecting against quantum computer
 attacks on authentication and transport.
 
-📄 **Citation**: S. Cormier, "Residual Classical Vulnerabilities in Quantum
-Key Distribution Control Channels," Zenodo, 2026.
-DOI: [10.5281/zenodo.18786526](https://doi.org/10.5281/zenodo.18786526).
+📄 **Citation**: S. Cormier, "Post-Quantum Protection of QKD Key Delivery: the
+ETSI GS QKD 014 Interface," Zenodo, version 3, November 2026.
+DOI: [10.5281/zenodo.24141165](https://doi.org/10.5281/zenodo.24141165).
+Version 3 corrects errors in the earlier versions (September 2025, February
+2026); its first page lists them. Please cite version 3.
 
 ## The problem
 

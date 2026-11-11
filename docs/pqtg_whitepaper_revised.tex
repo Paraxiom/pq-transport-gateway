@@ -6,20 +6,16 @@
 \usepackage{hyperref}
 \usepackage{cite}
 \usepackage{booktabs}
-\usepackage{algorithm}
-\usepackage{algpseudocode}
 \usepackage{xcolor}
 \usepackage{tcolorbox}
 
 % Theorem environments
 \newtheorem{theorem}{Theorem}
-\newtheorem{lemma}[theorem]{Lemma}
 \newtheorem{proposition}[theorem]{Proposition}
 \newtheorem{corollary}[theorem]{Corollary}
 \newtheorem{definition}{Definition}
 \newtheorem{remark}{Remark}
 
-% Hyperref setup
 \hypersetup{
     colorlinks=true,
     linkcolor=blue,
@@ -27,7 +23,7 @@
     urlcolor=blue
 }
 
-\title{\textbf{Post-Quantum Authentication for Quantum Key Distribution Control Channels}}
+\title{\textbf{Post-Quantum Protection of QKD Key Delivery:\\ the ETSI GS QKD 014 Interface}}
 
 \author{
     Sylvain Cormier \\
@@ -35,391 +31,323 @@
     \texttt{sylvain@paraxiom.org}
 }
 
-\date{September 2025 (original), February 2026 (revised)}
+\date{September 2025 (original), February 2026 (revised), November 2026 (corrected)}
 
 \begin{document}
 
 \maketitle
 
 \begin{abstract}
-Quantum Key Distribution (QKD) protocols achieve information-theoretic security by leveraging quantum mechanics, but their security proofs explicitly assume authenticated classical channels between endpoints. Contemporary QKD implementations---including those compliant with the ETSI GS QKD 014 key delivery API---realize this authentication using TLS 1.2/1.3 with RSA or ECDSA certificates, primitives vulnerable to polynomial-time quantum attacks via Shor's algorithm.
+Quantum Key Distribution (QKD) produces keys whose secrecy rests on physics. Those keys are then handed to the applications that use them through a key delivery interface, in most deployments the REST/HTTPS interface of ETSI GS QKD 014. That interface is protected by TLS, which today authenticates with RSA or elliptic curve signatures and, in most configurations, agrees its session keys with an elliptic curve exchange. Both are broken by Shor's algorithm.
 
-We prove (Theorem~\ref{thm:main}) that \textbf{any production QKD deployment using RSA/ECDSA authentication will be retroactively compromised once quantum computers become available}, even if the quantum channel itself is unconditionally secure. A harvest-now-decrypt-later adversary can capture classical TLS handshakes today, later forge certificates via Shor's algorithm, impersonate QKD endpoints, and extract all quantum-derived keys.
+This paper is about that delivery link. It is not about the classical channel that the two QKD units use between themselves for sifting, error correction and privacy amplification, which is authenticated separately and is outside our scope. We state precisely (Proposition~\ref{thm:main}) what follows for the delivered keys: an adversary who records delivery traffic today can recover the delivered keys once a quantum computer breaks the session's key exchange, and from that day can also impersonate a client or a key manager. The security of the quantum channel prevents neither.
 
-As a constructive solution, we present the Post-Quantum Transport Gateway (PQTG), a transparent security layer that replaces classical TLS authentication with NIST-standardized post-quantum primitives (ML-KEM-768, Falcon-512, SPHINCS+-256f) while maintaining backward compatibility with existing QKD infrastructure. PQTG requires no vendor firmware modifications---it deploys as a localhost gateway on existing QKD hardware.
-
-We provide formal security analysis under the quantum random oracle model, prove IND-CCA2 security for key exchange and EUF-CMA security for authentication, and demonstrate practical deployment through an open-source Rust implementation with performance benchmarks showing post-quantum operations outperform RSA-2048 by up to 125$\times$. Critical components are formally verified with 649 machine-checked theorems in Lean~4.
+We then describe the Post-Quantum Transport Gateway (PQTG), an open-source gateway that runs next to a key manager and replaces the exposed TLS endpoint with a post-quantum channel (ML-KEM-768 for key establishment, Falcon-512 signatures, AES-256-GCM), with no change to the vendor's equipment. We report what has been checked (symbolic models, tests, fuzzing, structural lemmas in Lean~4, one end-to-end run on a testbed) and what has not: there is no computational security proof of the protocol and no external audit, and the software is pre-stable.
 
 \medskip
-\noindent\textbf{Keywords:} Quantum Key Distribution, Post-Quantum Cryptography, ETSI QKD 014, authenticated channels, Shor's algorithm, ML-KEM, Falcon, SPHINCS+, harvest-now-decrypt-later
+\noindent\textbf{Keywords:} Quantum Key Distribution, post-quantum cryptography, ETSI GS QKD 014, key delivery, Shor's algorithm, ML-KEM, Falcon, harvest now, decrypt later
 \end{abstract}
 
-\newpage
-
-%% ─── EXECUTIVE SUMMARY ───
-\section*{Executive Summary (for non-specialist readers)}
-
-\begin{tcolorbox}[colback=red!5!white, colframe=red!60!black, title=\textbf{The Problem}]
-Every QKD system deployed today uses classical TLS certificates (RSA or ECDSA) to authenticate its control channel---the channel that transports quantum-derived encryption keys between endpoints. A future quantum computer can forge these certificates, impersonate QKD endpoints, and steal every key. \textbf{The quantum channel is secure. The classical channel next to it is not.}
-\end{tcolorbox}
-
-\begin{tcolorbox}[colback=blue!5!white, colframe=blue!60!black, title=\textbf{Who is affected}]
+\begin{tcolorbox}[colback=gray!6!white, colframe=gray!60!black, title=\textbf{Corrections in this version (November 2026)}]
+The earlier versions of this paper contained errors. This version replaces them.
 \begin{itemize}
-    \item Every ETSI QKD 014-compliant deployment worldwide
-    \item Vendors: Nokia (1830 PSS), ID Quantique (Cerberis XG), Toshiba QKD, QuantumCTek
-    \item Operators: national quantum networks, banking infrastructure, defence communications
-    \item Standard: ETSI GS QKD 014 V1.1.1 specifies REST/HTTPS for key delivery---inherently TLS-dependent
+    \item \textbf{Which channel.} Earlier versions said that deployed QKD systems authenticate the classical channel of the QKD protocol itself (basis reconciliation, error correction, privacy amplification) with TLS and RSA or ECDSA certificates. That merged two different links. The claim of this paper concerns key delivery only.
+    \item \textbf{The main result.} It was stated as a theorem about the QKD protocol's authentication assumption. It is now a proposition about delivered keys, and it separates passive recording from active impersonation.
+    \item \textbf{Security proofs.} The earlier ``IND-CCA2'' and ``EUF-CMA'' theorems for PQTG were not proofs and described certificates that the software does not use. They are removed. Section~\ref{sec:evidence} says what has been checked.
+    \item \textbf{Formal verification.} ``649 machine-checked theorems with zero unresolved assumptions'' did not describe this software. The gateway's own Lean development has 111 theorems about sizes and structure and one stated axiom.
+    \item \textbf{Performance.} The table comparing with RSA-2048 was not measured on this software. It is replaced by measurements of the gateway's operations.
+    \item \textbf{Other statements.} The list of named vendors as affected or supported, ``the only deployed mitigation'', the MIT licence, SPHINCS+-256f, the dependencies and the deployment commands were wrong or unsupported and have been corrected or removed.
 \end{itemize}
 \end{tcolorbox}
 
-\begin{tcolorbox}[colback=green!5!white, colframe=green!60!black, title=\textbf{The Solution: PQTG}]
-The Post-Quantum Transport Gateway (PQTG) is a software gateway that installs directly on QKD hardware. It replaces the classical TLS endpoint with post-quantum cryptography (NIST-standardized ML-KEM, Falcon, SPHINCS+). The vendor's classical API is never exposed to the network. No vendor firmware changes required. Open-source. Patent-free. MIT licensed.
+\newpage
+
+\section*{Summary for non-specialist readers}
+
+\begin{tcolorbox}[colback=red!5!white, colframe=red!60!black, title=\textbf{The problem}]
+A QKD system makes keys. Applications then fetch those keys from a key manager over an ordinary TLS connection, authenticated with classical certificates. A future quantum computer breaks that connection: it can decrypt recorded key deliveries and forge the certificates. \textbf{The keys are made with quantum security and delivered with classical security.}
 \end{tcolorbox}
 
-\begin{tcolorbox}[colback=yellow!5!white, colframe=orange!60!black, title=\textbf{Why this matters now}]
-Adversaries can record classical TLS traffic from QKD control channels \textbf{today}. When quantum computers arrive, they can retroactively decrypt these recordings, forge certificates, and extract every quantum key ever transported over those channels. This is the harvest-now-decrypt-later (HNDL) threat. The window for mitigation is \textbf{before} data is captured, not after.
+\begin{tcolorbox}[colback=blue!5!white, colframe=blue!60!black, title=\textbf{Where it applies}]
+Wherever keys leave a key manager over classical TLS and cross a network that an adversary can observe. ETSI GS QKD 014 specifies REST over HTTPS for key delivery, so the question arises for any deployment of that interface. How exposed a given deployment is depends on where the delivery link runs: inside one locked room it matters little, between sites it matters a great deal. We have not surveyed vendors or operators.
+\end{tcolorbox}
+
+\begin{tcolorbox}[colback=green!5!white, colframe=green!60!black, title=\textbf{What PQTG is}]
+A software gateway that runs on, or next to, the key manager. Clients reach it over a post-quantum channel; it reaches the vendor's interface over the local machine only. The vendor's equipment is not modified. It is open source (GPL-3.0, with a commercial licence available), pre-stable, and has not been externally audited.
+\end{tcolorbox}
+
+\begin{tcolorbox}[colback=yellow!5!white, colframe=orange!60!black, title=\textbf{Why timing matters}]
+An adversary can record key delivery traffic \textbf{today}. Once a quantum computer breaks the key exchange of those TLS sessions, every key delivered in them is exposed, together with whatever those keys protected, if that was recorded too. This can only be closed before the traffic is recorded.
 \end{tcolorbox}
 
 \newpage
 
 \section{Introduction}
 
-\subsection{Quantum Key Distribution and Classical Authentication}
+\subsection{Two classical links around a QKD system}
 
-Quantum Key Distribution~\cite{bennett1984quantum,ekert1991quantum} enables two parties to establish a shared secret key with security guaranteed by the laws of quantum mechanics rather than computational assumptions. The security of QKD protocols has been rigorously proven~\cite{gisin2002quantum,shor2000simple}, establishing information-theoretic confidentiality against eavesdropping on the quantum channel.
+Quantum Key Distribution~\cite{bennett1984quantum,ekert1991quantum} lets two parties establish a shared secret key with security that rests on quantum mechanics rather than on computational assumptions~\cite{gisin2002quantum,shor2000simple}.
 
-However, all QKD security proofs share a critical assumption: \textit{authenticated classical communication channels}~\cite{scarani2009security}. Without authentication, an adversary can mount man-in-the-middle attacks during basis reconciliation, error correction, privacy amplification, endpoint verification, and key management operations.
+Two classical links surround the quantum channel, and they must not be confused.
 
-The standard approach in deployed QKD systems is to implement this authenticated classical channel using TLS 1.2 or 1.3~\cite{etsi2023qkd}, relying on RSA (2048--4096 bit) or ECDSA (P-256, P-384) for digital signatures and X.509 certificate-based authentication.
+\textbf{The protocol channel.} The two QKD units exchange classical messages for sifting, parameter estimation, error correction and privacy amplification. QKD security proofs assume that this channel is authenticated~\cite{scarani2009security}. The usual construction is information-theoretic authentication with a pre-shared symmetric key~\cite{wegman1981new}, refreshed from the keys the link produces. It does not rely on RSA or elliptic curves. How a given product implements it is the vendor's matter, and this paper makes no claim about it.
 
-\subsection{The ETSI QKD 014 Control Channel}
+\textbf{The delivery link.} Once keys exist, applications obtain them from a key management entity through an application interface. The keys leave the QKD system on this link. It is the subject of this paper.
 
-The ETSI GS QKD 014 standard~\cite{etsi2023qkd} defines the application interface for QKD key delivery. It specifies a REST/HTTPS API through which key management systems retrieve quantum-derived keys from QKD endpoints. In production deployments, this API is authenticated using mutual TLS (mTLS) with X.509 client certificates signed by RSA or ECDSA.
+\subsection{The ETSI GS QKD 014 delivery interface}
 
-This means the channel that \textit{transports quantum keys} is itself protected only by classical cryptography. The quantum channel generates the keys; the classical channel delivers them. If the classical channel is compromised, the keys are compromised---regardless of the quantum channel's security.
+ETSI GS QKD 014~\cite{etsi2019qkd} defines a REST interface over HTTPS through which a secure application entity retrieves keys from a key management entity. In the deployment we have worked with, this interface is protected by mutual TLS with X.509 client certificates.
 
-\subsection{The Post-Quantum Authentication Gap}
+TLS 1.2 and 1.3, as standardized and as deployed today, authenticate with RSA, ECDSA or EdDSA signatures. Post-quantum signatures in TLS certificates are not yet standardized for general use, and we know of no QKD key manager that offers them; we have not surveyed the market. The channel that \textit{delivers} quantum keys is therefore protected by classical public-key cryptography. If a delivery session is broken, the keys it carried are known to the adversary, whatever the security of the quantum channel that produced them.
 
-Shor's algorithm~\cite{shor1997polynomial} enables quantum computers to factor integers and solve discrete logarithms in polynomial time, breaking RSA and elliptic curve cryptography. While the timeline for cryptographically relevant quantum computers remains uncertain (estimates range from 2030--2040~\cite{mosca2018cybersecurity}), the \textit{harvest-now-decrypt-later} (HNDL) threat is immediate: adversaries can capture encrypted communications today and decrypt them retroactively once quantum computers become available~\cite{nsa2022quantum}.
+\subsection{The gap}
 
-This creates a fundamental contradiction in current QKD deployments:
-\begin{quote}
-\textit{QKD systems designed to provide quantum-safe key distribution rely on classical authentication that is explicitly vulnerable to quantum attacks.}
-\end{quote}
-
-\subsection{Affected Infrastructure}
-
-This vulnerability is not theoretical or limited to a single vendor. It affects every QKD deployment that uses the ETSI QKD 014 API with classical TLS, including:
+Shor's algorithm~\cite{shor1997polynomial} factors integers and computes discrete logarithms in polynomial time on a quantum computer, which breaks RSA and elliptic curve cryptography. When such a computer will exist is uncertain~\cite{mosca2018cybersecurity}. Two distinct threats follow for the delivery link.
 
 \begin{itemize}
-    \item \textbf{Nokia 1830 PSS} --- uses HTTPS/REST with X.509 mTLS for key rotation between the security management server and QKD endpoints
-    \item \textbf{ID Quantique Cerberis XG} --- ETSI 014-compliant REST API with TLS client certificates
-    \item \textbf{Toshiba QKD System} --- management API over HTTPS
-    \item \textbf{QuantumCTek} --- similar HTTPS-based key management
-    \item \textbf{National quantum testbeds} --- Canada (Kirq), UK (UKQN), Europe (EuroQCI) --- all built on ETSI 014-compliant infrastructure
+    \item \textbf{Record now, decrypt later.} An adversary records delivery sessions today. Later, a quantum computer recovers the session keys from the recorded key exchange and decrypts the responses that carried the QKD keys. This threat exists from the day of the recording.
+    \item \textbf{Impersonation.} Once a quantum computer exists, an adversary can recover the private key behind a certificate and complete a TLS handshake as a client or as a key manager. This threat starts on that day and concerns sessions from then on.
 \end{itemize}
+
+\begin{quote}
+\textit{Keys produced with information-theoretic security are delivered over a link whose security a quantum computer removes.}
+\end{quote}
 
 \subsection{Contributions}
 
-This paper makes the following contributions:
-
 \begin{enumerate}
-    \item \textbf{Formal vulnerability analysis}: We prove that QKD deployments using classical public-key authentication are insecure against polynomial-time quantum adversaries (Theorem~\ref{thm:main}).
-
-    \item \textbf{Threat model formalization}: We define a precise adversary model capturing harvest-now-decrypt-later attacks, certificate authority compromise, and long-term key exposure specific to QKD infrastructure.
-
-    \item \textbf{Protocol design}: We present the Post-Quantum Transport Gateway (PQTG), a transparent security layer that replaces classical TLS authentication with NIST-standardized post-quantum primitives.
-
-    \item \textbf{Security proofs}: We prove PQTG achieves IND-CCA2 security for key encapsulation and EUF-CMA security for digital signatures under the quantum random oracle model (QROM).
-
-    \item \textbf{Implementation and evaluation}: We provide an open-source implementation and demonstrate that post-quantum operations achieve lower latency than RSA-based handshakes.
-
-    \item \textbf{Formal verification}: Critical security properties are verified with 649 machine-checked theorems in Lean~4~\cite{paraxiom2026lean4}, with zero unresolved assumptions.
+    \item A precise statement of what classical TLS on the delivery link means for the delivered keys (Proposition~\ref{thm:main}), kept separate from the QKD protocol's own classical channel.
+    \item The design of PQTG, a gateway that replaces the exposed TLS endpoint of a key manager with a post-quantum channel, without modifying the vendor's equipment.
+    \item An account of the evidence for the implementation, with its limits: symbolic models, tests, fuzzing, structural lemmas, measurements, and one end-to-end run with a commercial QKD system.
 \end{enumerate}
 
-\subsection{Related Work}
+\subsection{Related work}
 
-\textbf{Post-quantum cryptography.} NIST has standardized ML-KEM~\cite{nist2024pqc} (lattice-based key encapsulation), ML-DSA and SLH-DSA (signature schemes). These provide security against quantum adversaries under well-studied hardness assumptions.
+\textbf{Post-quantum cryptography.} NIST has standardized ML-KEM (FIPS 203), ML-DSA (FIPS 204) and SLH-DSA (FIPS 205)~\cite{nist2024pqc}. FN-DSA, derived from Falcon, is to be FIPS 206 and is not final at the time of writing.
 
-\textbf{Hybrid TLS.} The IETF is standardizing hybrid key exchange~\cite{stebila2023hybrid}. The Open Quantum Safe project~\cite{stebila2016postquantum} provides liboqs for post-quantum TLS. Google has deployed hybrid Kyber in Chrome~\cite{langley2023protecting}.
+\textbf{Hybrid TLS.} Hybrid key exchange for TLS 1.3~\cite{stebila2023hybrid}, supported by the Open Quantum Safe project~\cite{stebila2016postquantum} among others, adds a post-quantum key exchange next to the classical one. Where both ends of a delivery link support it, it answers the record-now, decrypt-later threat. It leaves authentication classical.
 
-\textbf{QKD security.} Prior work has identified implementation vulnerabilities~\cite{xu2020secure}, side-channel attacks~\cite{makarov2016creation}, and authentication requirements~\cite{scarani2009security}. However, post-quantum insecurity in QKD control channels has received limited formal treatment.
-
-\textbf{Distinction from prior work.} While hybrid TLS provides post-quantum key exchange, it typically retains classical signatures for authentication. Our work eliminates \textit{all} quantum-vulnerable primitives from QKD authentication, which is necessary because certificate forgery enables endpoint impersonation even with quantum-safe key exchange. No prior work has formalized this specific vulnerability in the context of ETSI QKD 014 deployments, nor provided a constructive mitigation with formal security proofs.
+\textbf{QKD security in practice.} Earlier work covers implementation weaknesses~\cite{xu2020secure}, attacks on devices~\cite{makarov2016creation}, the authentication requirement of the protocol channel~\cite{scarani2009security}, and QKD networking~\cite{mehic2020quantum}. We do not claim to be the first to observe that key delivery runs over classical TLS; our search of the literature was limited.
 
 \section{Preliminaries}
 
-\subsection{Quantum Key Distribution Model}
+\subsection{QKD security}
 
-\begin{definition}[QKD Security]
-A QKD protocol achieves $\epsilon$-security if, for any adversary controlling the quantum channel, the protocol outputs either a key $K$ satisfying:
-\begin{align}
-    \Pr[\text{abort}] &\leq \epsilon_{\text{rob}}, \quad
-    \Pr[K_A \neq K_B | \text{no abort}] \leq \epsilon_{\text{cor}} \nonumber
-\end{align}
-and the key is $\epsilon_{\text{sec}}$-close to uniform and independent of the adversary's quantum state.
+\begin{definition}[QKD security]
+A QKD protocol is $\epsilon$-secure if, for any adversary controlling the quantum channel, it either aborts or outputs keys $K_A$, $K_B$ with $\Pr[K_A \neq K_B] \leq \epsilon_{\text{cor}}$ and with $K_A$ $\epsilon_{\text{sec}}$-close to uniform and independent of the adversary's quantum state.
 \end{definition}
 
-\textbf{Critical assumption:} All QKD security proofs assume authenticated classical channels~\cite{shor2000simple}.
+These proofs assume an authenticated protocol channel~\cite{shor2000simple}. That assumption is not what this paper examines.
 
-\subsection{Classical Authentication via TLS}
+\subsection{Quantum adversary}
 
-Contemporary QKD implementations~\cite{mehic2020quantum,etsi2023qkd} use TLS 1.2/1.3 with X.509 certificates signed using RSA or ECDSA. The ETSI GS QKD 014 standard specifies HTTPS as the transport for key delivery, making TLS authentication a \textit{protocol requirement}, not merely an implementation choice.
-
-\subsection{Quantum Cryptanalysis}
-
-\begin{definition}[Quantum Adversary]
-A quantum adversary $\mathcal{A}$ has polynomial-time access to a quantum computer with arbitrary quantum operations on polynomially many qubits.
+\begin{definition}[Quantum adversary]
+A quantum adversary has polynomial-time access to a quantum computer.
 \end{definition}
 
-\begin{theorem}[Shor's Algorithm~\cite{shor1997polynomial}]
+\begin{theorem}[Shor~\cite{shor1997polynomial}]
 \label{thm:shor}
-Given an RSA modulus $N$ or elliptic curve discrete logarithm instance, a quantum adversary can recover the secret key in time $O((\log N)^3)$.
+A quantum adversary can factor an RSA modulus, and can compute discrete logarithms in a finite field or on an elliptic curve, in time polynomial in the size of the instance.
 \end{theorem}
 
-\textbf{Implications:} RSA-2048 requires $\approx$4098 logical qubits~\cite{roetteler2017quantum}; ECDSA P-256 requires $\approx$2330 qubits.
+Resource estimates are of the order of a few thousand logical qubits; for example about 2330 for the discrete logarithm on a 256-bit elliptic curve~\cite{roetteler2017quantum}. The number of physical qubits needed is far larger, and no such machine exists today.
 
-\subsection{Post-Quantum Primitives}
+\subsection{Post-quantum primitives used}
 
-\begin{definition}[Key Encapsulation Mechanism]
-A KEM consists of $(\mathsf{KeyGen}, \mathsf{Encaps}, \mathsf{Decaps})$. A KEM is IND-CCA2 secure if no polynomial-time adversary can distinguish encapsulated keys from random.
-\end{definition}
+A key encapsulation mechanism (KEM) is a triple $(\mathsf{KeyGen}, \mathsf{Encaps}, \mathsf{Decaps})$; a signature scheme is a triple $(\mathsf{KeyGen}, \mathsf{Sign}, \mathsf{Verify})$. PQTG uses ML-KEM-768~\cite{nist2024pqc} (NIST security category 3) for key establishment and Falcon-512~\cite{pornin2019falcon} (category 1) for signatures. Authentication is therefore at category 1, the lower of the two. An SLH-DSA-SHAKE-128f key (category 1) signs the gateway's audit log checkpoints and signs nothing in the handshake.
 
-\begin{definition}[Digital Signature Scheme]
-A signature scheme consists of $(\mathsf{KeyGen}, \mathsf{Sign}, \mathsf{Verify})$. It is EUF-CMA secure if no polynomial-time adversary can forge signatures on new messages.
-\end{definition}
+\section{System model and threats}
 
-We use ML-KEM-768~\cite{nist2024pqc} (NIST Level 3), Falcon-512~\cite{pornin2020falcon} (Level 1), and SPHINCS+-256f~\cite{nist2024pqc} (Level 5).
+\subsection{System}
 
-\section{System Model and Threat Analysis}
+A QKD link consists of two QKD units, a quantum channel and the protocol channel between them. Each site has a key management entity that stores the keys and serves them through the delivery interface. An application calls, for example, \texttt{/api/v1/keys/\{slave\_SAE\_ID\}/enc\_keys} over HTTPS, authenticated by mutual TLS, and receives key material with a key identifier; its peer retrieves the same key by that identifier from the key manager at the other site.
 
-\subsection{System Architecture}
+\subsection{Adversary}
 
-A QKD network consists of: QKD endpoints (Alice, Bob), quantum channel, classical channel, management API (REST/HTTPS per ETSI QKD 014), and Certificate Authority.
-
-In a typical deployment, a key management system (e.g., Nokia 1830 PSS) communicates with QKD hardware via the ETSI 014 REST API over HTTPS. The API call \texttt{GET /api/v1/keys/\{slave\_SAE\_ID\}/enc\_keys} retrieves quantum-derived keys. This call is authenticated by mutual TLS with X.509 client certificates.
-
-\subsection{Adversary Model}
-
-We define $\mathcal{A} = (\mathcal{A}_{\text{now}}, \mathcal{A}_{\text{future}})$:
+We consider $\mathcal{A} = (\mathcal{A}_{\text{now}}, \mathcal{A}_{\text{future}})$.
 
 \begin{itemize}
-    \item \textbf{$\mathcal{A}_{\text{now}}$}: Captures traffic passively, cannot break RSA/ECDSA classically
-    \item \textbf{$\mathcal{A}_{\text{future}}$}: Has quantum computer, can run Shor's algorithm, forge certificates
+    \item $\mathcal{A}_{\text{now}}$ observes and records traffic on the delivery link. It cannot break RSA or elliptic curve cryptography.
+    \item $\mathcal{A}_{\text{future}}$, from a time $t_1$, has a quantum computer, the recordings, and network access to the delivery link.
 \end{itemize}
 
-\textbf{Attack timeline:}
-\begin{enumerate}
-    \item Time $t_0$: $\mathcal{A}_{\text{now}}$ captures TLS handshakes on the ETSI 014 REST channel, including X.509 certificates and encrypted key-delivery payloads
-    \item Time $t_1$: $\mathcal{A}_{\text{future}}$ obtains quantum computer
-    \item Time $t_1$: Breaks RSA/ECDSA, recovers CA private key, forges certificates, impersonates QKD endpoints, extracts all quantum keys from $[t_0, t_1]$
-\end{enumerate}
+The adversary does not control the key manager or the application host. An adversary who does needs no cryptanalysis.
 
-\subsection{Threat Scenarios}
+\section{What classical TLS means for delivered keys}
 
-\textbf{Harvest-Now-Decrypt-Later:} Adversary captures certificates and encrypted sessions from the ETSI 014 channel, later uses Shor's algorithm to extract keys. Every quantum key transported over this channel during $[t_0, t_1]$ is compromised.
-
-\textbf{Certificate Authority Compromise:} With $sk_{\text{CA}}$ from Shor's algorithm, adversary generates valid certificates for any endpoint. All QKD endpoints trusting this CA are now impersonatable.
-
-\textbf{Long-Term Key Exposure:} X.509 certificates valid for years become retroactively compromised. A certificate issued today with a 10-year validity period is a 10-year window of vulnerability.
-
-\textbf{Active Impersonation:} After $t_1$, adversary can actively impersonate a QKD endpoint in real time, requesting keys from the ETSI 014 API with forged client certificates. The key management system (e.g., Nokia 1830) will deliver quantum keys to the adversary, believing it is communicating with a legitimate endpoint.
-
-\section{Main Security Result}
-
-\begin{theorem}[Authentication Collapse under Quantum Adversary]
+\begin{proposition}[Delivered keys inherit the security of the delivery session]
 \label{thm:main}
-Let $\Pi_{\text{QKD}}$ be a QKD protocol proven $\epsilon$-secure under authenticated classical channels. Let $\Pi_{\text{Auth}}$ be classical authentication using RSA/ECDSA. The composite protocol $\Pi = (\Pi_{\text{QKD}}, \Pi_{\text{Auth}})$ is insecure against the adversary $\mathcal{A} = (\mathcal{A}_{\text{now}}, \mathcal{A}_{\text{future}})$.
-
-Specifically, $\mathcal{A}$ can extract all quantum keys from $[t_0, t_1]$ and impersonate endpoints after $t_1$ with probability $1 - \text{negl}(\lambda)$.
-\end{theorem}
+Let a key $K$ be produced by a QKD link and delivered to an application in a TLS session whose key exchange and authentication use RSA or elliptic curve cryptography.
+\begin{enumerate}
+    \item (Passive.) If $\mathcal{A}_{\text{now}}$ records the session, then $\mathcal{A}_{\text{future}}$ recovers $K$.
+    \item (Active.) From $t_1$ on, $\mathcal{A}_{\text{future}}$ can impersonate a client to the key manager, or the key manager to a client, and so obtain keys or substitute them.
+\end{enumerate}
+Both hold whatever the security of the QKD protocol that produced $K$.
+\end{proposition}
 
 \begin{proof}
-\textbf{Phase 1 (Harvest):} $\mathcal{A}_{\text{now}}$ captures TLS handshakes with RSA/ECDSA public keys and encrypted API traffic on the ETSI 014 channel.
+(1) The session's traffic keys are derived from an RSA key transport or from a Diffie-Hellman exchange, over a finite field or an elliptic curve, whose public values are in the recorded handshake. By Theorem~\ref{thm:shor}, $\mathcal{A}_{\text{future}}$ recovers the shared secret, derives the traffic keys and decrypts the response that carries $K$.
 
-\textbf{Phase 2 (Decrypt):} $\mathcal{A}_{\text{future}}$ applies Shor's algorithm to factor $N$ or solve discrete log in time $O(\text{poly}(\log N))$ (Theorem~\ref{thm:shor}), recovering $sk_{\text{CA}}$.
-
-\textbf{Phase 3 (Impersonate):} Using $sk_{\text{CA}}$, adversary generates valid certificate $\text{cert}_M = \mathsf{Sign}(sk_{\text{CA}}, M)$ for malicious endpoint $M$, presents it to client $C$ when connecting to legitimate endpoint $A$. Client verifies $\mathsf{Verify}(pk_{\text{CA}}, \text{cert}_M) = 1$ and accepts $M$ as $A$.
-
-Success probability is $1 - \text{negl}(\lambda)$ since Shor succeeds with overwhelming probability. The authenticated channel assumption of $\Pi_{\text{QKD}}$ is violated, voiding all security guarantees.
-\qed
+(2) By Theorem~\ref{thm:shor}, $\mathcal{A}_{\text{future}}$ recovers the private key of a certificate, or of the authority that issued it, from the public key, and completes a TLS handshake as that party.
 \end{proof}
 
 \begin{corollary}
 \label{cor:main}
-Any production QKD deployment using RSA/ECDSA authentication---including all current ETSI QKD 014-compliant systems---will be retroactively compromised once quantum computers become available.
+A QKD deployment that delivers keys over TLS with RSA or elliptic curve cryptography, on a link the adversary can observe, does not provide quantum-safe keys to its applications, even when its quantum channel is secure.
 \end{corollary}
 
 \begin{remark}
-This result applies regardless of the QKD protocol used (BB84, E91, CV-QKD, etc.), regardless of the QKD hardware vendor, and regardless of whether the quantum channel itself achieves perfect information-theoretic security. The vulnerability is in the classical authentication layer, not the quantum layer.
+The statement follows directly from Shor's algorithm; its use is to say exactly what is and is not affected. It does not depend on the QKD protocol or the vendor. It says nothing about the protocol channel between the QKD units. Part~1 does not apply to a delivery session that uses a post-quantum or hybrid key exchange; part~2 applies as long as authentication is classical.
 \end{remark}
 
-\section{Post-Quantum Transport Gateway Protocol}
+\section{The Post-Quantum Transport Gateway}
 
-\subsection{Design Overview}
+\subsection{Design}
 
-PQTG replaces classical TLS authentication with post-quantum primitives via a transparent gateway co-located with QKD endpoints.
+PQTG runs on the key manager's machine, or on a machine next to it on a link the adversary cannot observe. It has two sides.
 
-\textbf{Architecture:} External interface uses PQ-TLS; internal interface connects to vendor API via localhost; vendor TLS is never exposed externally. The gateway is transparent to both the QKD hardware (which sees only a localhost client) and the key management system (which sees a PQ-authenticated endpoint).
+\begin{itemize}
+    \item \textbf{Outside.} It listens for clients on a post-quantum channel of its own. This is not TLS.
+    \item \textbf{Inside.} It calls the vendor's ETSI GS QKD 014 interface over classical TLS on the loopback interface, as a normal client of that interface.
+\end{itemize}
 
-\textbf{Key design principle:} PQTG requires zero modifications to vendor firmware or hardware. It installs as a software service on the same machine as the QKD endpoint, intercepting and re-securing the ETSI 014 API.
+The vendor's equipment is not modified. The protection holds only if the vendor's interface is in fact unreachable from the network, which is a matter of the host's configuration and outside what the gateway can enforce.
 
-\subsection{Cryptographic Protocols}
+There are no certificates and no certificate authority on the post-quantum channel. The gateway admits the clients whose public keys are listed in a local file, and a client is expected to compare the gateway's public key with a fingerprint it obtained beforehand, as with SSH.
 
-PQTG uses ML-KEM-768 for key establishment and dual signatures (Falcon-512 for online, SPHINCS+-256f for long-term).
+\subsection{Handshake}
 
-\begin{algorithm}
-\caption{PQTG Handshake}
-\begin{algorithmic}[1]
-\State $(pk_G, sk_G) \leftarrow \mathsf{ML\text{-}KEM.KeyGen}()$
-\State $C \rightarrow G$: ClientHello
-\State $G \rightarrow C$: $pk_G$, $\text{cert}_G$, $\sigma_G$ (Falcon signature)
-\State $C$ verifies: $\mathsf{Falcon.Verify}(pk_{\text{CA}}, \text{cert}_G, \sigma_G) = 1$
-\State $(ct, K) \leftarrow \mathsf{ML\text{-}KEM.Encaps}(pk_G)$
-\State $C \rightarrow G$: $ct$
-\State $G$: $K \leftarrow \mathsf{ML\text{-}KEM.Decaps}(sk_G, ct)$
-\State Derive session keys: $K_{\text{enc}}, K_{\text{mac}} \leftarrow \mathsf{HKDF}(K)$
-\end{algorithmic}
-\end{algorithm}
+The current wire version is 3.2. In outline:
 
-\subsection{Protocol Specification}
+\begin{enumerate}
+    \item The client generates a fresh ML-KEM-768 key pair for the session and sends a hello with the encapsulation key, its Falcon-512 public key, a time stamp and, if it wants a QKD key mixed in, its application identifier. The client signs the hello with its Falcon-512 key.
+    \item The gateway checks that the client's key is on its list, verifies the signature, and refuses a hello that is too old or already seen.
+    \item If the client asked for it and the key manager can serve it, the gateway obtains a QKD key and its identifier from the key manager.
+    \item The gateway encapsulates to the client's ML-KEM key, and signs with its Falcon-512 key a transcript that covers both hellos, the ciphertext, the key mode and the QKD key identifier.
+    \item The client verifies the signature against the gateway key it expects, decapsulates, and in hybrid mode retrieves the same QKD key by its identifier from the key manager on its own side.
+    \item Both ends derive the session key from the ML-KEM shared secret, the QKD key when present, and the transcript, using a domain-separated schedule based on HMAC-SHA3-256.
+\end{enumerate}
 
-PQTG listens on \texttt{0.0.0.0:8443} (external) and connects to \texttt{127.0.0.1:443} (vendor API). Firewall blocks external port 443 access. All ETSI 014 API calls (\texttt{/api/v1/keys/*}) are proxied transparently.
+The session key is expanded into one AES-256-GCM key per direction. Each direction counts its own nonces, and each end accepts only the next expected frame. Inside a session, each request and response is also signed with Falcon-512. The exact fields and the key schedule are specified in the repository (\texttt{docs/PROTOCOL-V3-QKD-KEYID.md}, \texttt{docs/KEY-SCHEDULE.md}).
 
-\section{Security Analysis}
+Hybrid mode requires a client that can reach the key manager on its own side. In the repository today, the gateway side of hybrid mode is implemented; a complete reference client for it is not.
 
-\begin{theorem}[PQTG IND-CCA2 Security]
-\label{thm:pqtg-kem}
-Under ML-KEM-768 IND-CCA2 security in QROM, PQTG key establishment achieves IND-CCA2 security against quantum adversaries.
-\end{theorem}
+\subsection{Other functions}
 
-\begin{proof}
-Security reduces to ML-KEM-768. If adversary $\mathcal{A}$ breaks PQTG with advantage $\epsilon$, we construct $\mathcal{B}$ breaking ML-KEM: $\mathcal{B}$ receives challenge $(pk^*, ct^*, K_b)$, simulates PQTG using $pk^*$, forwards $\mathcal{A}$'s guess. If $\mathcal{A}$ succeeds with $\epsilon$, then $\mathcal{B}$ breaks ML-KEM with $\epsilon - \text{negl}(\lambda)$. By ML-KEM security, $\epsilon \leq \text{negl}(\lambda)$.
-\qed
-\end{proof}
+The gateway keeps an audit log of connections, key requests and refused clients. The log is hash-chained and the gateway signs checkpoints with its SLH-DSA key. The signing key is a file on the same host, so the log detects changes made without that key, not changes made by whoever controls the host.
 
-\begin{theorem}[PQTG EUF-CMA Security]
-Under Falcon-512 and SPHINCS+-256f EUF-CMA security in QROM, PQTG authentication achieves EUF-CMA security.
-\end{theorem}
+\section{What has been checked, and what has not}
+\label{sec:evidence}
 
-\begin{proof}
-Dual-signature construction: certificates contain Falcon-512 keys signed by SPHINCS+ CA. To forge, adversary must break either Falcon (for session forgery) or SPHINCS+ (for certificate forgery). By EUF-CMA security of both schemes, forgery probability is $\text{negl}(\lambda)$.
-\qed
-\end{proof}
+There is no computational (reduction-based) security proof of the PQTG protocol. The security argument is the following, with the evidence for each part.
 
-\begin{proposition}[Forward Secrecy]
-PQTG provides forward secrecy: compromise of long-term signing keys does not compromise past session keys (established via ephemeral ML-KEM).
-\end{proposition}
+\textbf{Assumptions.} ML-KEM-768 is IND-CCA2 secure; Falcon-512 is unforgeable; HMAC-SHA3-256 behaves as a pseudorandom function; AES-256-GCM is a secure authenticated cipher; and the implementations used (the \texttt{paraxiom-pqc} crate and the RustCrypto crates) are correct. These are assumed, not derived, and \texttt{paraxiom-pqc} has not been externally audited.
 
-\begin{proposition}[Post-Compromise Security]
-PQTG supports key rotation, enabling recovery from compromise.
-\end{proposition}
+\textbf{Symbolic analysis.} The handshake, the client-signed hello, the session layer and the hybrid mode are modelled in Verifpal against an active attacker. In those models the session key stays confidential and the server is authenticated to the client, and the session key stays confidential when either the ML-KEM secret or the QKD key is given to the attacker, but not both. The model's query on authentication of the client's hello reports a replay: the model has no clocks and no server state, so it cannot express the time stamp and the replay guard with which the code refuses a hello it has already seen. A replayed hello exposes no secret. Verifpal is a symbolic, bounded tool: a pass means no attack was found within the session bound, under an idealized view of the primitives. The models, their results and their limits are in the repository under \texttt{formal/}.
 
-\section{Implementation and Performance}
+\textbf{Tests.} Unit, integration and property tests cover the handshake, the session layer and the ETSI GS QKD 014 client; the latter runs against an emulator of the interface. Fuzzing of four targets for 240 seconds each (about 5.2 million executions) found no crash. Mutation testing of the session code found gaps that were then closed with new tests. Of seven bounded model checking harnesses (Kani), one reached a verdict.
+
+\textbf{Lean 4.} The repository contains 111 machine-checked theorems. They concern sizes and structure: byte lengths, framing limits, the shape of the transcript, parameter values against the FIPS documents. They do not establish any security property, and the development declares one axiom, on agreement of the KEM's two shared secrets in its abstract model.
+
+\textbf{Forward secrecy.} The ML-KEM key pair is fresh for each session, so a later compromise of the signing keys does not expose past session keys under the assumptions above. This is argued, not proved.
+
+\textbf{Not done.} No external audit. No side-channel evaluation beyond timing tests of the underlying library. No validation under any certification scheme: the cryptographic implementations are not validated, Falcon-512 is not yet a final standard, and nothing in this paper should be read as a claim of compliance.
+
+\subsection{Known limits}
+
+The repository's threat model (\texttt{docs/THREAT-MODEL.md}) lists the limits known to us. The main ones:
+
+\begin{itemize}
+    \item A client must check the gateway's key fingerprint itself. A client that does not is exposed to an attacker in the middle.
+    \item Removing a client means editing the list of keys and restarting the gateway; there is no revocation mechanism.
+    \item Protection against denial of service is limited to connection limits and timeouts.
+    \item The signature inside a session covers the message only, not its session, direction or position. If one direction key leaks, a request the client really signed can be replayed.
+    \item The software is pre-stable. An earlier release reused AES-GCM nonces across the two directions of a session; it was withdrawn, and the advisory is in \texttt{SECURITY.md}.
+\end{itemize}
+
+\section{Implementation and measurements}
 
 \subsection{Implementation}
 
-PQTG is implemented in Rust using: \texttt{pqcrypto} (NIST reference implementations), \texttt{rustls} (TLS 1.3), \texttt{tokio} (async runtime).
+PQTG is written in Rust. The post-quantum primitives come from the \texttt{paraxiom-pqc} crate; AES-GCM, SHA-3 and HMAC from the RustCrypto crates; the asynchronous runtime is \texttt{tokio}. The connection to the vendor's interface uses a TLS library (\texttt{rustls}) whose cryptographic backend contains C and assembly code; that code is used only on the loopback side.
 
-Open source: \url{https://github.com/Paraxiom/pq-transport-gateway}
+Source: \url{https://github.com/Paraxiom/pq-transport-gateway}. Licence: GPL-3.0-only, or a commercial licence from Paraxiom.
 
-\noindent License: MIT --- patent-free, no licensing dependencies.
+\subsection{Measurements}
 
-\subsection{Performance Evaluation}
-
-Benchmarks on Intel Xeon 2.4 GHz:
+Table~\ref{tab:bench} gives the cost of the gateway's cryptographic operations, measured on 8 September 2026 with \texttt{criterion} on an Apple Silicon development machine. They are single-machine microbenchmarks, not throughput figures for a deployed gateway.
 
 \begin{table}[h]
 \centering
-\begin{tabular}{llll}
+\small
+\begin{tabular}{p{4.8cm}p{5.2cm}l}
 \toprule
-\textbf{Operation} & \textbf{RSA-2048} & \textbf{ML-KEM-768} & \textbf{Speedup} \\
+\textbf{Operation} & \textbf{Primitive} & \textbf{Time} \\
 \midrule
-Key generation & 50ms & 0.02ms & 2500$\times$ \\
-Encapsulation & 0.05ms & 0.03ms & 1.7$\times$ \\
-Decapsulation & 5ms & 0.04ms & 125$\times$ \\
-Handshake & $\sim$100ms & $\sim$80ms & 1.25$\times$ \\
+Identity key generation (once) & Falcon-512, SLH-DSA-SHAKE-128f & 7.27 ms \\
+Session key pair generation & ML-KEM-768 & 33.0 $\mu$s \\
+Encapsulation & ML-KEM-768 & 31.7 $\mu$s \\
+Decapsulation & ML-KEM-768 & 66.2 $\mu$s \\
+Transcript signature & Falcon-512 & 326 $\mu$s \\
+Transcript verification & Falcon-512 & 30.0 $\mu$s \\
+Transcript hash (about 3.2 KB) & SHA3-256 & 5.5 $\mu$s \\
 \bottomrule
 \end{tabular}
-\caption{Performance: Classical vs. Post-Quantum}
+\caption{Cost of the gateway's cryptographic operations (Apple Silicon, one core).}
+\label{tab:bench}
 \end{table}
 
-Post-quantum algorithms outperform RSA in most operations. PQTG introduces \textbf{no performance penalty} compared to classical TLS---it is strictly faster for key operations.
+With the identity key generated once, the cryptographic cost of accepting a connection is well under one millisecond on this machine. The signature on every message inside a session costs about 0.36 ms per message for signing and verification together, which bounds the message rate of one core; removing it is planned (Section~\ref{sec:future}). We make no comparison with classical TLS: we have not measured one under the same conditions.
 
-\subsection{Deployment}
+\subsection{Testbed run}
 
-PQTG supports major QKD vendors: ID Quantique (Cerberis XG), Toshiba QKD System, QuantumCTek, and Nokia 1830 PSS. Deployment involves: install on QKD hardware, configure firewall, generate PQ certificates, add authorized keys. Total deployment time: under one hour per endpoint.
-
-\subsection{Formal Verification}
-
-Critical security properties of the Paraxiom cryptographic stack---including Falcon-512 parameter correctness, SPHINCS+ security bounds, ML-KEM field arithmetic, and transport frame integrity---are formally verified with 649 machine-checked theorems in Lean~4~\cite{paraxiom2026lean4} using Mathlib v4.27.0, with \textbf{zero unresolved assumptions} (\texttt{sorry}-free).
+The gateway's ETSI GS QKD 014 client passes its nine-item conformance suite against our reference emulator. On a Canadian quantum communication testbed, in June 2026, a key was retrieved through the delivery interface of a commercial QKD system, and the key with the same identifier, retrieved at the peer key manager, was identical. This is one vendor and one recorded run. Equipment from other vendors on the same testbed was reachable, but we completed no key delivery with it.
 
 \section{Discussion}
 
-\subsection{Why Hybrid TLS Is Insufficient}
+\subsection{Hybrid TLS}
 
-A common response to the post-quantum threat is to deploy hybrid TLS, which adds post-quantum key exchange to TLS 1.3 while retaining classical authentication. This is insufficient for QKD control channels because:
+Hybrid TLS adds a post-quantum key exchange to TLS 1.3 and keeps classical certificates. Where a key manager and its clients support it, it removes the record-now, decrypt-later threat (part~1 of Proposition~\ref{thm:main}), which is the more urgent of the two. It does not remove impersonation by an adversary who has a quantum computer (part~2); that needs post-quantum authentication on both sides of a mutually authenticated link. PQTG addresses both parts, at the price of a non-standard protocol on the outside.
 
-\begin{enumerate}
-    \item Hybrid TLS typically retains RSA/ECDSA \textit{signatures} for certificate authentication
-    \item Shor's algorithm breaks the signature scheme, enabling certificate forgery
-    \item With a forged certificate, an adversary can impersonate a QKD endpoint even if the key exchange is quantum-safe
-    \item The ETSI 014 API uses mutual TLS---both client \textit{and} server certificates must be post-quantum
-\end{enumerate}
+\subsection{Alternatives}
 
-PQTG eliminates \textit{all} classical cryptographic primitives from the authentication path.
-
-\subsection{No Alternative Solutions Exist}
-
-To our knowledge, PQTG is the only deployed mitigation for this vulnerability:
+PQTG is one way to protect the delivery link. Others exist or will exist:
 
 \begin{itemize}
-    \item \textbf{Vendor firmware updates}: Would require each QKD vendor (Nokia, IDQ, Toshiba, etc.) to independently implement and certify PQ-TLS. No vendor has announced plans to do so.
-    \item \textbf{Pre-shared keys from QKD}: Creates a circular dependency---QKD keys cannot authenticate the channel that delivers QKD keys.
-    \item \textbf{VPN tunneling}: Wrapping ETSI 014 in a PQ VPN is functionally equivalent to PQTG but less integrated, less auditable, and not purpose-built for QKD infrastructure.
+    \item \textbf{Vendor support.} A key manager that offers post-quantum key exchange and, later, post-quantum certificates on its own interface needs no gateway. We do not know vendors' plans.
+    \item \textbf{A tunnel.} The delivery link can be carried in a VPN that uses post-quantum key exchange or pre-shared symmetric keys. This protects the link without a purpose-built gateway; it does not by itself give per-application authentication at the key manager.
+    \item \textbf{Pre-shared symmetric keys.} TLS with pre-shared keys avoids public-key cryptography altogether, at the cost of distributing and rotating those keys.
+    \item \textbf{Physical separation.} Where the application and the key manager share a protected enclosure, the delivery link is not observable and the question does not arise.
 \end{itemize}
 
-\subsection{Practical Considerations}
+\subsection{Limitations of the approach}
 
-\textbf{Hybrid mode:} PQTG supports hybrid classical+PQ for transitional deployments, though pure PQ is recommended.
-
-\textbf{Certificate lifecycle:} SPHINCS+ signatures enable long-term certificate validity (10+ years) without quantum vulnerability.
-
-\textbf{Vendor integration:} PQTG requires no vendor modifications, only deployment as gateway.
-
-\textbf{QRNG seeding:} All PQ key generation can optionally be seeded from quantum random number generators (QRNG), providing hardware-grade entropy independent of algorithmic PRNGs.
-
-\subsection{Limitations}
-
-\textbf{Trust assumptions:} PQTG assumes NIST PQC algorithms are secure. Cryptanalytic advances could require algorithm updates.
-
-\textbf{Implementation attacks:} Side-channel resistance requires constant-time implementations (available in \texttt{pqcrypto}).
-
-\textbf{Deployment complexity:} Operators must manage PQ certificates and key rotation.
+PQTG assumes that the post-quantum algorithms it uses are secure; advances in cryptanalysis could require changing them, and the current version fixes its algorithms at build time. Its outside protocol is its own and has had far less scrutiny than TLS. The gateway is an additional component to operate, and a host that runs it becomes part of the trusted base of the key manager.
 
 \section{Conclusion}
 
-QKD systems rely on classical authentication vulnerable to quantum attacks, undermining their quantum security guarantees. We formalized this vulnerability (Theorem~\ref{thm:main}) and proved that \textbf{every ETSI QKD 014-compliant deployment using RSA/ECDSA authentication is retroactively compromisable} (Corollary~\ref{cor:main}).
+QKD keys are delivered to applications over classical TLS. A quantum computer removes the security of that link, first for recorded sessions and then for live ones, whatever the security of the quantum channel. This concerns key delivery; it does not concern the protocol channel between the QKD units.
 
-We presented PQTG as a constructive solution providing post-quantum authentication with formal security proofs, practical implementation, and formal verification in Lean~4. PQTG is the only known deployed mitigation for this vulnerability. It requires no vendor modifications, introduces no performance penalty, and is available as open-source software under the MIT license.
+PQTG is an open-source gateway that replaces the exposed delivery endpoint with a post-quantum channel without modifying the vendor's equipment. It has been modelled symbolically, tested, fuzzed, and run once end to end with a commercial QKD system. It has no computational security proof and no external audit, and it is pre-stable. It is one of several ways to close the gap.
 
-As quantum computing advances and nations invest in quantum communication infrastructure, ensuring that the classical layers of these systems are quantum-safe is not optional---it is urgent. The window for harvest-now-decrypt-later mitigation is closing.
-
-\subsection{Future Work}
+\subsection{Future work}
+\label{sec:future}
 
 \begin{itemize}
-    \item FIPS 140-3 certification of PQTG
-    \item Extended formal verification of the PQTG handshake protocol in Lean~4
-    \item Integration with ETSI QKD 004 (device interface) in addition to 014
-    \item Standardization proposal for post-quantum ETSI QKD API authentication
-    \item High-throughput optimization for backbone QKD deployments
+    \item A profile with ML-DSA-65 for authentication, next to Falcon-512, with the choice bound into the signed handshake.
+    \item Signing only in the handshake, with authenticated encryption alone for messages inside a session.
+    \item Keeping the gateway's keys in a hardware security module.
+    \item A revocation mechanism for client and gateway keys.
+    \item A complete reference client, including the client side of hybrid mode.
+    \item Algorithm validation of the cryptographic library as a first step towards any certification, and an external audit.
 \end{itemize}
 
 \section*{Acknowledgments}
 
-We thank the NIST Post-Quantum Cryptography project and Open Quantum Safe initiative for foundational work in post-quantum cryptography. We acknowledge the operators of Canada's Kirq quantum testbed for providing a real-world environment for QKD infrastructure research.
+We thank the NIST Post-Quantum Cryptography project and the Open Quantum Safe project for foundational work. We thank the operators of the Canadian quantum communication testbed on which the run of Section~7.3 was made, for access to real QKD equipment.
 
-\bibliographystyle{plain}
+This corrected version was prepared with the help of an AI assistant. The author checked each statement against the source code, the test records and the measurements cited, and is responsible for the content.
+
 \begin{thebibliography}{99}
 
 \bibitem{bennett1984quantum}
@@ -447,10 +375,15 @@ V. Scarani et al.,
 ``The security of practical quantum key distribution,''
 \textit{Rev. Mod. Phys.}, vol. 81, no. 3, p. 1301, 2009.
 
-\bibitem{etsi2023qkd}
+\bibitem{wegman1981new}
+M. N. Wegman and J. L. Carter,
+``New hash functions and their use in authentication and set equality,''
+\textit{J. Comput. Syst. Sci.}, vol. 22, no. 3, pp. 265--279, 1981.
+
+\bibitem{etsi2019qkd}
 ETSI,
-``Quantum Key Distribution (QKD); Application Interface,''
-\textit{ETSI GS QKD 014 V1.1.1}, 2023.
+``Quantum Key Distribution (QKD); Protocol and data format of REST-based key delivery API,''
+\textit{ETSI GS QKD 014 V1.1.1}, 2019.
 
 \bibitem{shor1997polynomial}
 P. W. Shor,
@@ -462,30 +395,20 @@ M. Mosca,
 ``Cybersecurity in an era with quantum computers: will we be ready?''
 \textit{IEEE Security \& Privacy}, vol. 16, no. 5, pp. 38--41, 2018.
 
-\bibitem{nsa2022quantum}
-NSA,
-``Quantum Computing and Post-Quantum Cryptography,''
-\textit{Cybersecurity Information Sheet}, 2022.
-
 \bibitem{nist2024pqc}
 NIST,
-``Post-Quantum Cryptography: Selected Algorithms 2024,''
+``Module-Lattice-Based Key-Encapsulation Mechanism Standard; Module-Lattice-Based Digital Signature Standard; Stateless Hash-Based Digital Signature Standard,''
 \textit{FIPS 203, 204, 205}, 2024.
 
 \bibitem{stebila2023hybrid}
 D. Stebila, S. Fluhrer, and S. Gueron,
 ``Hybrid key exchange in TLS 1.3,''
-\textit{IETF Internet-Draft}, draft-ietf-tls-hybrid-design-09, 2023.
+\textit{IETF Internet-Draft}, draft-ietf-tls-hybrid-design.
 
 \bibitem{stebila2016postquantum}
 D. Stebila and M. Mosca,
 ``Post-quantum key exchange for the Internet and the Open Quantum Safe project,''
 \textit{Int. Conf. Selected Areas in Cryptography}, pp. 1--24, 2016.
-
-\bibitem{langley2023protecting}
-A. Langley,
-``Protecting Chrome Traffic with Hybrid Kyber KEM,''
-\textit{Google Security Blog}, 2023.
 
 \bibitem{xu2020secure}
 F. Xu, X. Ma, Q. Zhang, H. K. Lo, and J. W. Pan,
@@ -497,75 +420,54 @@ V. Makarov et al.,
 ``Creation of backdoors in quantum communications via laser damage,''
 \textit{Phys. Rev. A}, vol. 94, no. 3, p. 030302, 2016.
 
-\bibitem{pornin2020falcon}
+\bibitem{pornin2019falcon}
 T. Pornin,
-``New Efficient, Constant-Time Implementations of Falcon,''
-\textit{Post-Quantum Cryptography: 11th Int. Conf.}, pp. 307--324, 2020.
+``New efficient, constant-time implementations of Falcon,''
+\textit{IACR Cryptology ePrint Archive}, Report 2019/893, 2019.
 
 \bibitem{roetteler2017quantum}
-M. Roetteler et al.,
+M. Roetteler, M. Naehrig, K. M. Svore, and K. Lauter,
 ``Quantum resource estimates for computing elliptic curve discrete logarithms,''
-\textit{Advances in Cryptology--ASIACRYPT}, pp. 241--270, 2017.
+\textit{Advances in Cryptology -- ASIACRYPT 2017}, pp. 241--270, 2017.
 
 \bibitem{mehic2020quantum}
 M. Mehic et al.,
 ``Quantum key distribution: a networking perspective,''
 \textit{ACM Comput. Surv.}, vol. 53, no. 5, pp. 1--41, 2020.
 
-\bibitem{paraxiom2026lean4}
-S. Cormier,
-``649 Lean 4 Theorems: Formal Verification Across Eight Post-Quantum Systems,''
-\textit{Zenodo}, DOI: 10.5281/zenodo.14805498, 2026.
-
-\bibitem{empireclub2026}
-Empire Club of Canada,
-``Quantum Power and National Security: Canada's New Strategic Imperative,''
-Panel discussion, February 25, 2026.
-
 \end{thebibliography}
 
 \appendix
 
-\section{Deployment Guide}
+\section{Running the gateway}
 
-\textbf{Installation:}
+Build and generate the gateway's identity:
 \begin{verbatim}
 git clone https://github.com/Paraxiom/pq-transport-gateway
 cd pq-transport-gateway
 cargo build --release
-sudo ./install.sh
+sudo ./target/release/pq-qkd-proxy --generate-keys
 \end{verbatim}
 
-\textbf{Configuration:}
+Configuration (\texttt{/etc/pq-qkd-proxy/config.toml}):
 \begin{verbatim}
 [proxy]
-listen = "0.0.0.0:8443"
+listen = "192.168.1.100:8443"
 
 [qkd]
-vendor_api = "https://127.0.0.1:443"
+vendor_api  = "https://localhost:443"
+vendor_cert = "/etc/qkd/vendor-cert.pem"
 
 [security]
-pq_kex = "ml-kem-768"
-pq_sig = "falcon512"
+pq_algorithm    = "falcon512"
+sig_algorithm   = "slh-dsa-shake128f"
+authorized_keys = "/etc/pq-qkd-proxy/authorized_keys"
 \end{verbatim}
 
-\textbf{Firewall:}
-\begin{verbatim}
-# Block external access to vendor API
-iptables -A INPUT -p tcp --dport 443 ! -s 127.0.0.1 -j DROP
-# Allow PQTG
-iptables -A INPUT -p tcp --dport 8443 -j ACCEPT
-\end{verbatim}
+The vendor's interface must not be reachable from the network; how to ensure that depends on the host and on the vendor's equipment. The repository's README and \texttt{docs/CLIENT-INTEGRATION.md} are the reference for current options.
 
-\section{Security Parameters}
+\section{Security categories}
 
-NIST security levels:
-\begin{itemize}
-    \item Level 1: $\geq$ AES-128 (64-bit quantum security)
-    \item Level 3: $\geq$ AES-192 (96-bit quantum security)
-    \item Level 5: $\geq$ AES-256 (128-bit quantum security)
-\end{itemize}
-
-PQTG uses Level 3 (ML-KEM-768) for 50\% margin above AES-128.
+NIST defines its post-quantum security categories by comparison with symmetric primitives: breaking a category 1 scheme should be at least as hard as key search on AES-128, category 3 as key search on AES-192, and category 5 as key search on AES-256. PQTG uses ML-KEM-768 (category 3) for key establishment and Falcon-512 (category 1) for authentication.
 
 \end{document}

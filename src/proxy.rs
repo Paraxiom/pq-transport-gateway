@@ -13,13 +13,19 @@
 //! Session layer (wire `2.1` and `3.2`, both handshakes): the session key is
 //! expanded into one AES-256-GCM key per direction and each end accepts only
 //! the next expected frame (`crypto::PqSession`, docs/KEY-SCHEDULE.md §5). The
-//! server accepts exactly these two versions and refuses older peers at the
+//! server speaks exactly these two versions and refuses older peers at the
 //! hello, since their session layer is not compatible.
+//!
+//! Which of the two a gateway accepts is a setting, `proxy.versions`, and it
+//! is `["3.2"]` unless the operator says otherwise. The 2.1 hello is not
+//! signed, so wire 2.1 is off by default; where it is switched on, only a
+//! client key whose `authorized_keys` line carries `wire=2.1` may use it, and
+//! that key is then refused on 3.2 (`check_wire_enabled`, `check_key_wire`).
 
 use crate::{
     audit,
-    auth::Authenticator,
-    config::Config,
+    auth::{Authenticator, AuthorizedKey},
+    config::{Config, ProxyConfig, WIRE_2_1, WIRE_3_2},
     crypto::{
         derive_session_key, derive_v3_session_key, encapsulate_to, mix_keys, random_bytes,
         transcript_hash, transcript_hash_v3, HandshakeVersion, PqKeyExchange, PqSession, Role,
@@ -265,6 +271,81 @@ fn handshake_for_version(version: &str) -> Result<HandshakeVersion> {
     }
 }
 
+/// The name a wire version has on the wire, in `proxy.versions` and in the
+/// `wire=` option of `authorized_keys`.
+fn wire_name(version: HandshakeVersion) -> &'static str {
+    match version {
+        HandshakeVersion::V2 => PROTOCOL_VERSION,
+        HandshakeVersion::V3 => PROTOCOL_VERSION_V3,
+    }
+}
+
+/// Is this wire version switched on at this gateway (`proxy.versions`)? Runs
+/// on the version field alone, before the hello is parsed any further: with
+/// the default setting a 2.1 hello costs the gateway nothing, whoever sent it
+/// and whatever keys it names.
+fn check_wire_enabled(proxy: &ProxyConfig, version: HandshakeVersion) -> Result<()> {
+    let name = wire_name(version);
+    if proxy.accepts_wire(name) {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "wire {name} is switched off on this gateway (proxy.versions = {:?}). A client that \
+         cannot speak another version yet needs {name:?} in proxy.versions and wire={name} on \
+         its authorized_keys line",
+        proxy.versions
+    ))
+}
+
+/// May this authorized key speak this wire version? Each key has one: 3.2, or
+/// 2.1 when its `authorized_keys` line says `wire=2.1`. So a key that speaks
+/// 3.2 cannot be named in a 2.1 hello, which carries no proof that its sender
+/// holds the key, and a request signed in a 3.2 session has no 2.1 session to
+/// be replayed in.
+fn check_key_wire(key: &AuthorizedKey, version: HandshakeVersion) -> Result<()> {
+    if key.wire == version {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "client key {} is registered for wire {} and was presented in a wire {} hello",
+        key.key_id,
+        wire_name(key.wire),
+        wire_name(version)
+    ))
+}
+
+/// Say at startup which wire versions are on and how many keys can use each,
+/// and warn about every combination in which a client will be refused or in
+/// which wire 2.1 is open.
+fn log_wire_policy(proxy: &ProxyConfig, authenticator: &Authenticator) {
+    info!("Wire versions accepted: {:?}", proxy.versions);
+    for version in [HandshakeVersion::V3, HandshakeVersion::V2] {
+        let name = wire_name(version);
+        let keys = authenticator.count_for_wire(version);
+        match (proxy.accepts_wire(name), keys) {
+            (true, 0) => warn!(
+                "Wire {name} is switched on but no authorized key is registered for it: no \
+                 client can use it"
+            ),
+            (false, 0) => {}
+            (false, n) => warn!(
+                "{n} authorized key(s) are registered for wire {name}, which is switched off \
+                 (proxy.versions): those clients will be refused"
+            ),
+            (true, n) => info!("Wire {name}: {n} authorized key(s)"),
+        }
+    }
+    if proxy.accepts_wire(WIRE_2_1) {
+        warn!(
+            "Wire {WIRE_2_1} is switched ON. Its hello is not signed: anyone who knows the \
+             public keys of a client marked wire={WIRE_2_1} can open a session in its name, and \
+             a key request that client once signed is accepted again in such a session \
+             (docs/THREAT-MODEL.md, L6). Remove {WIRE_2_1:?} from proxy.versions once those \
+             clients speak {WIRE_3_2}"
+        );
+    }
+}
+
 /// Minimal prefix decode to pick the struct shape before full deserialization.
 /// bincode is not self-describing, but it encodes the leading `version:
 /// String` first in both v2 and v3 hellos, so a peek at that one field is
@@ -300,12 +381,12 @@ pub struct KeyMetadata {
 /// into one record key per direction with strict receive sequencing
 /// (`crypto::PqSession`). A 2.0 peer seals with the session key itself, in
 /// both directions, so it is refused at the hello.
-const PROTOCOL_VERSION: &str = "2.1";
+const PROTOCOL_VERSION: &str = WIRE_2_1;
 /// 3.2: the v3 handshake and key schedule of 3.1 are unchanged, and the
 /// session layer changes as for 2.1. History: 3.1 moved the v3 hashes and key
 /// schedule to the domain tree and keyed chain in `crate::kdf` (backlog
 /// B2/B3); 3.0 used flat labels. Neither is accepted.
-const PROTOCOL_VERSION_V3: &str = "3.2";
+const PROTOCOL_VERSION_V3: &str = WIRE_3_2;
 const MAX_HELLO_BYTES: usize = 16 * 1024;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 /// Sanity cap on the client-supplied SAE-ID (ETSI 014 SAE_IDs are short
@@ -556,6 +637,7 @@ impl ProxyServer {
     pub async fn with_identity(config: Arc<Config>, host_key: Arc<PqKeyExchange>) -> Result<Self> {
         let qkd_client = QkdClient::new(&config)?;
         let authenticator = Authenticator::new(&config)?;
+        log_wire_policy(&config.proxy, &authenticator);
         // The guard must remember a hello for the whole interval in which its
         // timestamp is acceptable, which is one second more than 2 × skew:
         // `for_skew` gives the window (see replay.rs).
@@ -642,6 +724,9 @@ impl ProxyServer {
         let version = handshake_for_version(&peek.version).inspect_err(|e| {
             warn!("Refused hello from {}: {}", peer_addr, e);
         })?;
+        check_wire_enabled(&self.config.proxy, version).inspect_err(|e| {
+            warn!("Refused hello from {}: {}", peer_addr, e);
+        })?;
         match version {
             HandshakeVersion::V3 => self.handshake_v3(stream, peer_addr, &hello_bytes).await,
             HandshakeVersion::V2 => self.handshake_v2(stream, peer_addr, &hello_bytes).await,
@@ -654,6 +739,7 @@ impl ProxyServer {
     /// KMS keys (spec §7, DoS note).
     fn validate_and_authorize(
         &self,
+        version: HandshakeVersion,
         kem_ek: &[u8],
         falcon_vk: &[u8],
         slh_dsa_vk: &[u8],
@@ -682,9 +768,20 @@ impl ProxyServer {
         }
         match self.authenticator.verify_client(falcon_vk, slh_dsa_vk) {
             Ok(auth_key) => {
+                // An authorized key on the wrong wire version is refused like
+                // an unknown key, and recorded: it is either a client that has
+                // not been moved in `authorized_keys`, or someone naming a 3.2
+                // client in a 2.1 hello.
+                if let Err(e) = check_key_wire(auth_key, version) {
+                    audit::log_auth_failure(peer_addr, &e.to_string());
+                    warn!("Rejected client {}: {}", peer_addr, e);
+                    return Err(e);
+                }
                 debug!(
-                    "Client authorized: key_id={} peer={}",
-                    auth_key.key_id, peer_addr
+                    "Client authorized: key_id={} wire={} peer={}",
+                    auth_key.key_id,
+                    wire_name(version),
+                    peer_addr
                 );
                 Ok(())
             }
@@ -709,6 +806,7 @@ impl ProxyServer {
     ) -> Result<(PqSession, Vec<u8>)> {
         let client_hello: ClientHello = bincode::deserialize(hello_bytes)?;
         self.validate_and_authorize(
+            HandshakeVersion::V2,
             &client_hello.kem_ek,
             &client_hello.falcon_vk,
             &client_hello.slh_dsa_vk,
@@ -750,6 +848,7 @@ impl ProxyServer {
                 .map_err(|e| anyhow!("ClientHello.client_sae_id refused: {e}"))?;
         }
         self.validate_and_authorize(
+            HandshakeVersion::V3,
             &client_hello.kem_ek,
             &client_hello.falcon_vk,
             &client_hello.slh_dsa_vk,
@@ -1063,6 +1162,93 @@ mod tests {
         }
         assert_eq!(PROTOCOL_VERSION, "2.1");
         assert_eq!(PROTOCOL_VERSION_V3, "3.2");
+    }
+
+    // ── which of the two a gateway accepts (`proxy.versions`, `wire=`) ───────
+
+    fn proxy_config(versions: &[&str]) -> ProxyConfig {
+        let mut proxy = Config::default().proxy;
+        proxy.versions = versions.iter().map(|v| v.to_string()).collect();
+        proxy
+    }
+
+    fn authorized_key(wire: HandshakeVersion) -> AuthorizedKey {
+        AuthorizedKey {
+            key_id: "key-0".to_string(),
+            falcon_public_key: vec![1u8; FALCON_512_VK_LEN],
+            sphincs_public_key: vec![2u8; SLH_DSA_SHAKE128F_VK_LEN],
+            permissions: vec!["read".to_string()],
+            comment: String::new(),
+            wire,
+        }
+    }
+
+    /// With the default setting a 2.1 hello is refused on its version alone,
+    /// and a 3.2 hello passes. The refusal says what to change.
+    #[test]
+    fn wire_2_1_is_refused_unless_the_gateway_lists_it() {
+        let default = Config::default().proxy;
+        check_wire_enabled(&default, HandshakeVersion::V3).expect("3.2 is on by default");
+        let err =
+            check_wire_enabled(&default, HandshakeVersion::V2).expect_err("2.1 is off by default");
+        let text = err.to_string();
+        assert!(text.contains("wire 2.1 is switched off"), "got: {text}");
+        assert!(text.contains("proxy.versions"), "got: {text}");
+        assert!(text.contains("wire=2.1"), "got: {text}");
+
+        let both = proxy_config(&["3.2", "2.1"]);
+        check_wire_enabled(&both, HandshakeVersion::V3).unwrap();
+        check_wire_enabled(&both, HandshakeVersion::V2).unwrap();
+
+        let legacy_only = proxy_config(&["2.1"]);
+        check_wire_enabled(&legacy_only, HandshakeVersion::V2).unwrap();
+        let err = check_wire_enabled(&legacy_only, HandshakeVersion::V3).unwrap_err();
+        assert!(
+            err.to_string().contains("wire 3.2 is switched off"),
+            "{err}"
+        );
+
+        // A list set by hand to nothing, or to a version the gateway does not
+        // speak, switches everything off. It never switches something on.
+        for versions in [&[][..], &["3.1"][..], &["2.0", "4.0"][..]] {
+            let odd = proxy_config(versions);
+            assert!(check_wire_enabled(&odd, HandshakeVersion::V2).is_err());
+            assert!(check_wire_enabled(&odd, HandshakeVersion::V3).is_err());
+        }
+    }
+
+    /// A key speaks one wire version. A 3.2 key named in a 2.1 hello is
+    /// refused, and so is a 2.1 key in a 3.2 hello.
+    #[test]
+    fn a_key_is_refused_on_the_wire_version_it_is_not_registered_for() {
+        let modern = authorized_key(HandshakeVersion::V3);
+        check_key_wire(&modern, HandshakeVersion::V3).unwrap();
+        let err = check_key_wire(&modern, HandshakeVersion::V2).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("registered for wire 3.2 and was presented in a wire 2.1 hello"),
+            "got: {err}"
+        );
+
+        let legacy = authorized_key(HandshakeVersion::V2);
+        check_key_wire(&legacy, HandshakeVersion::V2).unwrap();
+        let err = check_key_wire(&legacy, HandshakeVersion::V3).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("registered for wire 2.1 and was presented in a wire 3.2 hello"),
+            "got: {err}"
+        );
+    }
+
+    /// The version strings of the setting, of the `wire=` option and of the
+    /// hello are the same strings.
+    #[test]
+    fn the_setting_and_the_hello_name_versions_the_same_way() {
+        assert_eq!(wire_name(HandshakeVersion::V2), WIRE_2_1);
+        assert_eq!(wire_name(HandshakeVersion::V3), WIRE_3_2);
+        for version in [HandshakeVersion::V2, HandshakeVersion::V3] {
+            assert_eq!(handshake_for_version(wire_name(version)).unwrap(), version);
+        }
     }
 
     // ── v3 (PROTOCOL-V3-QKD-KEYID.md) ────────────────────────────────────────

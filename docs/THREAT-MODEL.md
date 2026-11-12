@@ -124,7 +124,7 @@ resolve one; `cargo install --locked` uses the published `Cargo.lock`.
 |T3 | **Future Falcon SK compromise** (long-term key leaks years later).           | Mitigated (S5) | Each handshake uses a fresh ephemeral ML-KEM keypair (`crypto.rs::EphemeralKemKey`). Past `kem_ss` cannot be recovered from a future Falcon SK leak. **Argued, not formally proved**.                 |
 |T4 | **Current Falcon SK compromise** (long-term key leaks now).                  | Detected       | Future authentication breaks (any new session can be forged), but past sessions remain confidential per T3. Operators must rotate via `--generate-keys` and update `authorized_keys` distribution.    |
 |T5 | **Replay** of recorded handshake to either side.                             | Mitigated      | Both `client_random` and `server_random` are 32-byte fresh values bound into the transcript hash (`transcript_hash`). A repeat transcript would require both sides to re-emit the same randoms.       |
-|T6 | **Algorithm downgrade** to weaker primitives.                                | Mitigated      | Algorithms are not negotiated. The gateway accepts exactly wire `2.1` and `3.2` (`proxy.rs::handshake_for_version`) and refuses every other version at the hello. ML-KEM-768, Falcon-512, SLH-DSA-Shake128f, AES-256-GCM are compile-time constants in `crypto.rs`. |
+|T6 | **Algorithm downgrade** to weaker primitives.                                | Mitigated      | Algorithms are not negotiated. The gateway speaks exactly wire `2.1` and `3.2` (`proxy.rs::handshake_for_version`) and refuses every other version at the hello. Which of the two it accepts is the setting `proxy.versions`, `["3.2"]` by default: wire `2.1` is off unless listed, and then serves only the keys marked `wire=2.1` in `authorized_keys`, which are refused on `3.2` (L6). ML-KEM-768, Falcon-512, SLH-DSA-Shake128f, AES-256-GCM are compile-time constants in `crypto.rs`. |
 |T7 | **Harvest-now-decrypt-later** quantum adversary.                             | Mitigated      | All cryptographic primitives are post-quantum (FIPS 203/204/205). No classical KEX (DH/ECDH) anywhere in the wire path. Loopback TLS to the vendor is *out* of scope per O6.                          |
 |T8 | **`authorized_keys` file tampering** by local privileged process.            | Mitigated by A1| File permissions enforced 0o600 by `--generate-keys`. Unauthorized rewrite implies A1 violation; not an additional defense layer.                                                                     |
 |T9 | **Audit log post-hoc tampering**.                                            | **Detected, with limits** (S4) | Each run's lines form a hash chain over their exact bytes (`audit.rs::chain_entry`), and after `audit_checkpoint_events` events or `audit_checkpoint_secs` seconds the gateway signs the chain head, bound to the run's random `log_id`, with its SLH-DSA-Shake128f identity key (`checkpoint` lines). `--verify-audit-log` reports a line before the last checkpoint that was edited, removed, inserted or moved; a checkpoint signed for another log or by another key; and a change to the line before a run's first line. Limits: the signing key is a file on the same host (A1), so whoever controls the host can rewrite the log and re-sign it; events after the last checkpoint stay unsigned until the next one; removing the end of the file, its last checkpoint included, cannot be detected from the file alone (copy checkpoints off the host to cover that); a run without a persisted identity is chained but not signed, and a chain without a signature proves nothing, so the verifier reports such runs, runs with no checkpoint and files that start mid-run as not verified (exit 2) rather than OK; rotating with `copytruncate` produces such a file, so rotate by renaming; verification needs `proxy.pub` obtained out of band. Tests: `audit::tests`, `tests/audit_verify_cli.rs`; vectors `tests/vectors/audit-v1.json`. |
@@ -155,7 +155,7 @@ resolve one; `cargo install --locked` uses the published `Cargo.lock`.
 | FIPS 203/204/205 parameter conformance              | **Proved by Lean**      | `lean/PQTGProofs/{MLKem,Falcon,Sphincs,Auth,Session,KeyMixing,ETSI014,Handshake}.lean` — 95 lemmas total, zero sorries        |
 | EUF-CMA / IND-CCA security of primitives            | **Assumed** (A5–A8)     | Not re-derived in Lean. Inherited from the FIPS standards and assumed of the `paraxiom-pqc` implementation (A10), which has not been externally audited. |
 | Forward secrecy under future Falcon SK compromise   | **Argued, not proved**  | Argument: ephemeral ML-KEM keypair per handshake; A5 implies past `kem_ss` is unreachable from any non-handshake key.       |
-| Mutual authentication                               | **Server→client only**  | Server signs transcript; clients are authorized by `authorized_keys` lookup but PQTG does not currently challenge the client to prove possession of `dk` for the published `ek`. |
+| Mutual authentication                               | **Wire 3.2: both directions, with a limit. Wire 2.1: server→client only** | Wire 3.2: the client signs its hello with its allow-listed Falcon-512 key, which shows it holds that key and ties its ML-KEM key to it (`proxy::admit_hello_v3`); the server signs the transcript. The limit: the hello is one message, so a recorded hello verifies again; the gateway refuses it by its signed timestamp and its replay guard, which the symbolic model cannot express (`formal/CLIENTAUTH-RESULTS-2026-09-12.md`). Wire 2.1: the server signs the transcript, the hello is not signed, and clients are authorized by `authorized_keys` lookup only; for that reason it is off by default since 2026-11-12 (L6). |
 
 ## 6. Known limitations
 
@@ -204,6 +204,25 @@ resolve one; `cargo install --locked` uses the published `Cargo.lock`.
   (`formal/GATEWAY-SESSION-RESULTS-2026-10-15.md`). Closing it means
   signing the session id, direction and counter with the data, which is
   a wire change; not done.
+
+  On wire `2.1` no leaked key is needed. The 2.1 hello is not signed, so
+  anyone who knows a client's two public keys can open a 2.1 session in
+  its name, and holds that session's keys. A request that client signed
+  once is then accepted again in that session. What it takes is the
+  plaintext of one signed request. Shown on the code by
+  `tests/gateway_session.rs::on_wire_2_1_a_signed_request_is_served_again_to_someone_else`:
+  the holder of one signed request and of the two public keys is served a
+  key, twice. Since 2026-11-12:
+  - wire `2.1` is off by default (`proxy.versions`), so a gateway that
+    does not list it refuses such a hello at its version field;
+  - where an operator lists it, it serves only the keys whose
+    `authorized_keys` line says `wire=2.1`. Such a key is refused on
+    `3.2`, and every other key is refused on `2.1`, so a request signed
+    in a `3.2` session has no `2.1` session to be replayed in
+    (`a_signed_request_of_a_3_2_client_finds_no_2_1_session`).
+
+  It stays open for a key marked `wire=2.1` on a gateway that lists
+  `2.1`. Requests from such keys are not rate limited yet.
 
 ## 7. Review questions for ETSI ISG-QKD
 

@@ -49,6 +49,55 @@ pub struct ProxyConfig {
     /// fails closed rather than reopening the replay window.
     #[serde(default = "default_hello_replay_cache_entries")]
     pub hello_replay_cache_entries: usize,
+
+    /// Wire versions this gateway accepts for key delivery sessions: `"3.2"`
+    /// and, for a client that cannot move yet, `"2.1"`. Default: `["3.2"]`.
+    ///
+    /// Wire 2.1 is off unless it is listed here. Its hello is not signed:
+    /// anyone can open a 2.1 session in the name of a client whose public
+    /// keys it knows, and a key request that client once signed is accepted
+    /// again in such a session (`docs/THREAT-MODEL.md`, L6). Listing `"2.1"`
+    /// here is not enough for a client: its line in `authorized_keys` must
+    /// also carry `wire=2.1`, and a key marked that way is refused on 3.2.
+    #[serde(default = "default_versions")]
+    pub versions: Vec<String>,
+}
+
+/// The wire versions a gateway can be told to accept (`proxy.versions`).
+pub const WIRE_3_2: &str = "3.2";
+pub const WIRE_2_1: &str = "2.1";
+
+impl ProxyConfig {
+    /// Is this wire version switched on at this gateway?
+    pub fn accepts_wire(&self, version: &str) -> bool {
+        self.versions.iter().any(|v| v == version)
+    }
+
+    /// `proxy.versions` must name at least one version, only versions this
+    /// gateway speaks, and each once. A value such as `"3.1"` or `"2.0"` is
+    /// refused here and not ignored: those peers are refused at the hello
+    /// whatever the list says, and an operator who lists one should learn it
+    /// at startup.
+    fn validate_versions(&self) -> Result<()> {
+        if self.versions.is_empty() {
+            anyhow::bail!(
+                "proxy.versions is empty: the gateway would refuse every client. \
+                 Use [\"{WIRE_3_2}\"], the default"
+            );
+        }
+        for (i, v) in self.versions.iter().enumerate() {
+            if v != WIRE_3_2 && v != WIRE_2_1 {
+                anyhow::bail!(
+                    "proxy.versions: {v:?} is not a wire version this gateway speaks \
+                     (\"{WIRE_3_2}\", and \"{WIRE_2_1}\" for clients that cannot move yet)"
+                );
+            }
+            if self.versions[..i].contains(v) {
+                anyhow::bail!("proxy.versions lists {v:?} twice");
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -340,6 +389,7 @@ impl Config {
 
     pub fn validate(&self) -> Result<()> {
         self.relay.validate()?;
+        self.proxy.validate_versions()?;
 
         // The vendor API must be on this machine: its TLS is the classical
         // link the gateway exists to keep off the network.
@@ -472,6 +522,7 @@ impl Default for Config {
                 allowed_sources: vec![],
                 hello_max_skew_secs: default_hello_max_skew_secs(),
                 hello_replay_cache_entries: default_hello_replay_cache_entries(),
+                versions: default_versions(),
             },
             qkd: QkdConfig {
                 vendor_api: "https://localhost:8080".to_string(),
@@ -522,6 +573,9 @@ fn default_connection_timeout() -> u64 {
 }
 fn default_hello_max_skew_secs() -> u64 {
     120
+}
+fn default_versions() -> Vec<String> {
+    vec![WIRE_3_2.to_string()]
 }
 fn default_hello_replay_cache_entries() -> usize {
     131_072
@@ -693,6 +747,102 @@ audit_log = "/var/log/pq-qkd-proxy/audit.log"
 "#;
         let cfg: Config = toml::from_str(toml_src).expect("legacy config must parse");
         assert!(!cfg.relay.is_enabled(), "the relay must default to OFF");
+    }
+
+    /// The same file, as a base for the tests of `proxy.versions`: `extra`
+    /// goes under `[proxy]`.
+    fn config_with_proxy_lines(extra: &str) -> Result<Config> {
+        let text = format!(
+            r#"
+[proxy]
+listen = "127.0.0.1:8443"
+{extra}
+
+[qkd]
+vendor_api = "https://localhost:8080"
+default_slave_sae_id = "sae-b"
+default_master_sae_id = "sae-a"
+
+[security]
+pq_algorithm = "falcon512"
+sig_algorithm = "sphincsplus"
+authorized_keys = "/etc/pq-qkd-proxy/authorized_keys"
+proxy_private_key = "/etc/pq-qkd-proxy/proxy.key"
+proxy_certificate = "/etc/pq-qkd-proxy/proxy.crt"
+audit_log = "/var/log/pq-qkd-proxy/audit.log"
+
+[performance]
+"#
+        );
+        Ok(toml::from_str::<Config>(&text)?)
+    }
+
+    /// Wire 2.1 is off unless the operator switches it on: in the built-in
+    /// default, and in a file that says nothing about versions, which is
+    /// every file written before the setting existed. Such a gateway serves
+    /// 3.2 clients as before and refuses 2.1 clients after the upgrade.
+    #[test]
+    fn wire_2_1_is_off_by_default() {
+        let built_in = Config::default();
+        assert_eq!(built_in.proxy.versions, vec!["3.2".to_string()]);
+        assert!(built_in.proxy.accepts_wire(WIRE_3_2));
+        assert!(!built_in.proxy.accepts_wire(WIRE_2_1));
+        built_in
+            .proxy
+            .validate_versions()
+            .expect("the default is valid");
+
+        let from_file = config_with_proxy_lines("").expect("a file without versions parses");
+        assert_eq!(from_file.proxy.versions, vec!["3.2".to_string()]);
+        assert!(!from_file.proxy.accepts_wire(WIRE_2_1));
+    }
+
+    #[test]
+    fn wire_2_1_is_on_only_when_listed() {
+        let cfg = config_with_proxy_lines(r#"versions = ["3.2", "2.1"]"#).unwrap();
+        cfg.proxy
+            .validate_versions()
+            .expect("both versions is valid");
+        assert!(cfg.proxy.accepts_wire(WIRE_3_2));
+        assert!(cfg.proxy.accepts_wire(WIRE_2_1));
+
+        // A gateway may also be told to serve its legacy clients only.
+        let cfg = config_with_proxy_lines(r#"versions = ["2.1"]"#).unwrap();
+        cfg.proxy.validate_versions().expect("2.1 alone is valid");
+        assert!(!cfg.proxy.accepts_wire(WIRE_3_2));
+        assert!(cfg.proxy.accepts_wire(WIRE_2_1));
+
+        // A version is matched exactly: nothing is on by prefix or by number.
+        for near in ["2", "2.10", "3", "3.20", " 2.1", "2.1 ", "v2.1", ""] {
+            assert!(!cfg.proxy.accepts_wire(near), "{near:?} must not match");
+        }
+    }
+
+    /// A list the gateway cannot serve is refused at startup, with the
+    /// reason, and never read as "the default".
+    #[test]
+    fn a_bad_version_list_is_refused_at_startup() {
+        for (lines, expected) in [
+            (r#"versions = []"#, "is empty"),
+            (r#"versions = ["3.1"]"#, "not a wire version"),
+            (r#"versions = ["3.2", "2.0"]"#, "not a wire version"),
+            (r#"versions = ["3.2", "4.0"]"#, "not a wire version"),
+            (r#"versions = ["3.2", "3.2"]"#, "twice"),
+            (r#"versions = ["2.1", "3.2", "2.1"]"#, "twice"),
+        ] {
+            let cfg = config_with_proxy_lines(lines).expect("the file itself parses");
+            let err = cfg
+                .proxy
+                .validate_versions()
+                .expect_err("the list must be refused");
+            assert!(err.to_string().contains(expected), "{lines}: {err}");
+            // And `validate`, which the binary runs, stops on it.
+            let err = cfg.validate().expect_err("validate must refuse it too");
+            assert!(err.to_string().contains(expected), "{lines}: {err}");
+        }
+        // A value of the wrong type is a parse error.
+        assert!(config_with_proxy_lines(r#"versions = "3.2""#).is_err());
+        assert!(config_with_proxy_lines(r#"versions = [3.2]"#).is_err());
     }
 
     fn sock(s: &str) -> SocketAddr {

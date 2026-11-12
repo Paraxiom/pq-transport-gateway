@@ -372,10 +372,15 @@ fn generate_proxy_keys() -> Result<()> {
 
     if !Path::new(&auth_keys_path).exists() {
         let template = r#"# PQTG Authorized Keys
-# Format: algorithm base64(falcon_vk(897) || slh_dsa_shake128f_vk(32)) permissions comment
+# Format: algorithm base64(falcon_vk(897) || slh_dsa_shake128f_vk(32)) [perm=a,b] [wire=2.1] comment
 #
 # Example:
 # falcon512+slh-dsa-shake128f <base64-encoded-public-keys> perm=read,write client@example.com
+#
+# A key speaks wire 3.2. For a client that still speaks wire 2.1, add wire=2.1
+# to its line AND list "2.1" in proxy.versions; that key is then refused on
+# 3.2. Wire 2.1 is off by default: its hello is not signed.
+# falcon512+slh-dsa-shake128f <base64-encoded-public-keys> perm=read wire=2.1 legacy@example.com
 "#;
         fs::write(&auth_keys_path, template)?;
         let mut perms = fs::metadata(&auth_keys_path)?.permissions();

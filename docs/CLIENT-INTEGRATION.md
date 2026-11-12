@@ -235,6 +235,26 @@ falcon512+slh-dsa-shake128f <base64(falcon_vk_897 ‖ slh_dsa_vk_32)> perm=read,
 
 The client must publish the same vk pair in its `ClientHello`.
 
+**Wire 2.1 is off by default.** A line registers the key for wire `3.2`. The
+handshake this document describes is wire `2.1`, whose hello is not signed
+(`THREAT-MODEL.md`, L6). For a client that speaks it, the operator does two
+things: lists it in the gateway configuration,
+
+```
+[proxy]
+versions = ["3.2", "2.1"]
+```
+
+and adds `wire=2.1` to the client's line:
+
+```
+falcon512+slh-dsa-shake128f <base64(falcon_vk_897 ‖ slh_dsa_vk_32)> perm=read wire=2.1 client@example.com
+```
+
+Without both, the gateway closes the connection at the hello and its log
+says which of the two is missing. A key registered for `2.1` is refused on
+`3.2`: when the client moves to `3.2`, the operator removes the option.
+
 **Distribution** of these client vks to PQTG operators is symmetric to
 operator-fingerprint distribution above (signed manifest, HSM, DNS, etc.).
 
@@ -261,8 +281,9 @@ operator-fingerprint distribution above (signed manifest, HSM, DNS, etc.).
 This document tracks wire `2.1` and the session layer it shares with `3.2`;
 the v3 handshake itself is specified in `PROTOCOL-V3-QKD-KEYID.md`. The
 `version` field in `ClientHello` selects the handshake, by exact match: the
-gateway accepts `"2.1"` and `"3.2"` only
-(`proxy.rs::handshake_for_version`) and refuses every other version at the
+gateway speaks `"2.1"` and `"3.2"` only
+(`proxy.rs::handshake_for_version`; `"2.1"` only where the operator has
+switched it on, §6) and refuses every other version at the
 hello, including `"2.0"`, `"3.0"` and `"3.1"`, whose session layer used one key
 for both directions.
 

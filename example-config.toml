@@ -18,6 +18,12 @@ allowed_sources = [
     "10.0.0.0/8"
 ]
 
+# Wire versions accepted. Default: ["3.2"].
+# Wire 2.1 has an unsigned hello and is off unless it is listed here. A client
+# that still speaks 2.1 also needs wire=2.1 on its authorized_keys line, and
+# is then refused on 3.2. Remove "2.1" once the last such client has moved.
+# versions = ["3.2", "2.1"]
+
 [qkd]
 # Vendor QKD API endpoint - MUST be localhost for security
 vendor_api = "https://localhost:443"

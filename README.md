@@ -121,6 +121,15 @@ authorized_keys = "/etc/pq-qkd-proxy/authorized_keys"
 falcon512+slh-dsa-shake128f <base64(falcon_vk(897) || slh_dsa_vk(32))> perm=read,write client@example.com
 ```
 
+A key speaks wire `3.2`. Wire `2.1` is off by default, because its hello is
+not signed (`docs/THREAT-MODEL.md`, L6). A client that cannot move yet needs
+two things: `versions = ["3.2", "2.1"]` under `[proxy]`, and `wire=2.1` on
+its line. That key is then refused on `3.2`.
+
+```
+falcon512+slh-dsa-shake128f <base64(falcon_vk(897) || slh_dsa_vk(32))> perm=read wire=2.1 legacy-client@example.com
+```
+
 ## Security properties
 
 - **No external TLS**: vendor TLS stays on `127.0.0.1`

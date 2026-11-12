@@ -1,6 +1,7 @@
 //! Authentication and authorization
 
-use crate::config::Config;
+use crate::config::{Config, WIRE_2_1, WIRE_3_2};
+use crate::crypto::HandshakeVersion;
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose, Engine as _};
 use std::collections::HashMap;
@@ -24,6 +25,11 @@ pub struct AuthorizedKey {
     pub sphincs_public_key: Vec<u8>,
     pub permissions: Vec<String>,
     pub comment: String,
+    /// The one wire version this key may speak: 3.2, unless its line carries
+    /// `wire=2.1`. A key never opens both doors: a key request signed in a
+    /// 3.2 session would otherwise be accepted again in a 2.1 session, whose
+    /// hello anyone can send in this client's name.
+    pub wire: HandshakeVersion,
 }
 
 impl Authenticator {
@@ -51,6 +57,14 @@ impl Authenticator {
         self.authorized_keys.len()
     }
 
+    /// Number of authorized keys registered for this wire version.
+    pub fn count_for_wire(&self, wire: HandshakeVersion) -> usize {
+        self.authorized_keys
+            .values()
+            .filter(|k| k.wire == wire)
+            .count()
+    }
+
     fn load_authorized_keys(path: &str) -> Result<HashMap<String, AuthorizedKey>> {
         let mut keys = HashMap::new();
 
@@ -69,7 +83,7 @@ impl Authenticator {
                 continue;
             }
 
-            // Parse line: algorithm key_data permissions comment
+            // Parse line: algorithm key_data [perm=a,b] [wire=2.1] comment
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() < 3 {
                 warn!(
@@ -112,19 +126,23 @@ impl Authenticator {
             let falcon_pk = decoded[..FALCON_VK_LEN].to_vec();
             let sphincs_pk = decoded[FALCON_VK_LEN..FALCON_VK_LEN + SLH_DSA_VK_LEN].to_vec();
 
-            // Parse permissions
-            let permissions = if parts.len() > 2 && parts[2].starts_with("perm=") {
-                parts[2][5..].split(',').map(|s| s.to_string()).collect()
-            } else {
-                vec!["read".to_string()]
+            // Options, in either order, then the comment. A line whose
+            // options cannot be read is dropped, like any other malformed
+            // line: the key is then not authorized at all, which fails
+            // closed. In particular a mistyped `wire=` never turns into the
+            // default.
+            let options = match parse_options(&parts[2..]) {
+                Ok(o) => o,
+                Err(e) => {
+                    warn!("Invalid authorized_keys line {}: {}", line_no + 1, e);
+                    continue;
+                }
             };
-
-            // Rest is comment
-            let comment = if parts.len() > 3 {
-                parts[3..].join(" ")
-            } else {
-                String::new()
-            };
+            let permissions = options
+                .permissions
+                .unwrap_or_else(|| vec!["read".to_string()]);
+            let wire = options.wire.unwrap_or(HandshakeVersion::V3);
+            let comment = parts[2 + options.consumed..].join(" ");
 
             let key_id = format!("key-{line_no}");
 
@@ -136,6 +154,7 @@ impl Authenticator {
                     sphincs_public_key: sphincs_pk,
                     permissions,
                     comment,
+                    wire,
                 },
             );
         }
@@ -163,6 +182,52 @@ impl Authenticator {
     }
 }
 
+/// The options of an `authorized_keys` line: what follows the key and comes
+/// before the comment.
+struct LineOptions {
+    permissions: Option<Vec<String>>,
+    wire: Option<HandshakeVersion>,
+    /// How many tokens were options; the comment starts after them.
+    consumed: usize,
+}
+
+/// Read `perm=a,b` and `wire=2.1` (or `wire=3.2`) from the start of `tokens`,
+/// in either order, each at most once. The first token that is neither ends
+/// the options.
+fn parse_options(tokens: &[&str]) -> Result<LineOptions> {
+    let mut options = LineOptions {
+        permissions: None,
+        wire: None,
+        consumed: 0,
+    };
+    for token in tokens {
+        if let Some(list) = token.strip_prefix("perm=") {
+            if options.permissions.is_some() {
+                return Err(anyhow!("perm= given twice"));
+            }
+            options.permissions = Some(list.split(',').map(|s| s.to_string()).collect());
+        } else if let Some(version) = token.strip_prefix("wire=") {
+            if options.wire.is_some() {
+                return Err(anyhow!("wire= given twice"));
+            }
+            options.wire = Some(match version {
+                WIRE_2_1 => HandshakeVersion::V2,
+                WIRE_3_2 => HandshakeVersion::V3,
+                other => {
+                    return Err(anyhow!(
+                        "wire={other} is not a wire version (use wire={WIRE_2_1}, or no option \
+                         for {WIRE_3_2})"
+                    ))
+                }
+            });
+        } else {
+            break;
+        }
+        options.consumed += 1;
+    }
+    Ok(options)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,6 +239,7 @@ mod tests {
             sphincs_public_key: slh,
             permissions: perms.into_iter().map(String::from).collect(),
             comment: String::new(),
+            wire: HandshakeVersion::V3,
         }
     }
 
@@ -255,5 +321,132 @@ mod tests {
         // Cross-pairs are unauthorized — even though both keys are independently valid.
         assert!(auth.verify_client(&f1, &s2).is_err());
         assert!(auth.verify_client(&f2, &s1).is_err());
+    }
+
+    // ---- the wire version of a key (`wire=`) --------------------------------
+
+    /// A key of the right length whose bytes are all `tag`, as the base64 an
+    /// `authorized_keys` line carries. The loader checks lengths only.
+    fn line_key(tag: u8) -> String {
+        let mut vks = vec![tag; 897];
+        vks.extend_from_slice(&[tag; 32]);
+        general_purpose::STANDARD.encode(vks)
+    }
+
+    /// Load an `authorized_keys` file with this content.
+    fn load(content: &str) -> HashMap<String, AuthorizedKey> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "pqtg-authorized-keys-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, content).unwrap();
+        let keys = Authenticator::load_authorized_keys(&path.to_string_lossy()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        keys
+    }
+
+    /// The key loaded from the line whose key bytes are `tag`, if that line
+    /// was accepted.
+    fn loaded(keys: &HashMap<String, AuthorizedKey>, tag: u8) -> Option<&AuthorizedKey> {
+        keys.values().find(|k| k.falcon_public_key[0] == tag)
+    }
+
+    const ALG: &str = "falcon512+slh-dsa-shake128f";
+
+    /// Every line written before the option existed is a 3.2 key. No existing
+    /// file gives a client wire 2.1.
+    #[test]
+    fn a_line_without_the_option_is_a_wire_3_2_key() {
+        let keys = load(&format!(
+            "{ALG} {} perm=read,write alice@example.com\n\
+             {ALG} {} bob with a comment\n",
+            line_key(1),
+            line_key(2),
+        ));
+        assert_eq!(keys.len(), 2);
+        let alice = loaded(&keys, 1).unwrap();
+        assert_eq!(alice.wire, HandshakeVersion::V3);
+        assert_eq!(alice.permissions, vec!["read", "write"]);
+        assert_eq!(alice.comment, "alice@example.com");
+        let bob = loaded(&keys, 2).unwrap();
+        assert_eq!(bob.wire, HandshakeVersion::V3);
+        assert_eq!(bob.permissions, vec!["read"]);
+        assert_eq!(bob.comment, "bob with a comment");
+    }
+
+    #[test]
+    fn wire_2_1_is_read_from_the_line_before_or_after_perm() {
+        let keys = load(&format!(
+            "{ALG} {} perm=read wire=2.1 legacy client one\n\
+             {ALG} {} wire=2.1 perm=read,write legacy client two\n\
+             {ALG} {} wire=2.1\n\
+             {ALG} {} wire=3.2 said in full\n",
+            line_key(1),
+            line_key(2),
+            line_key(3),
+            line_key(4),
+        ));
+        assert_eq!(keys.len(), 4);
+        let one = loaded(&keys, 1).unwrap();
+        assert_eq!(one.wire, HandshakeVersion::V2);
+        assert_eq!(one.permissions, vec!["read"]);
+        assert_eq!(one.comment, "legacy client one");
+        let two = loaded(&keys, 2).unwrap();
+        assert_eq!(two.wire, HandshakeVersion::V2);
+        assert_eq!(two.permissions, vec!["read", "write"]);
+        assert_eq!(two.comment, "legacy client two");
+        let three = loaded(&keys, 3).unwrap();
+        assert_eq!(three.wire, HandshakeVersion::V2);
+        assert_eq!(three.permissions, vec!["read"]);
+        assert_eq!(three.comment, "");
+        let four = loaded(&keys, 4).unwrap();
+        assert_eq!(four.wire, HandshakeVersion::V3);
+        assert_eq!(four.comment, "said in full");
+
+        let auth = Authenticator {
+            authorized_keys: keys,
+        };
+        assert_eq!(auth.count_for_wire(HandshakeVersion::V2), 3);
+        assert_eq!(auth.count_for_wire(HandshakeVersion::V3), 1);
+    }
+
+    /// A `wire=` the loader cannot read drops the line: the key is then not
+    /// authorized at all. It must never become a 3.2 key by default, nor a
+    /// 2.1 key by resemblance.
+    #[test]
+    fn a_line_with_an_unreadable_option_authorizes_nobody() {
+        for option in [
+            "wire=2.0",
+            "wire=3.1",
+            "wire=2",
+            "wire=",
+            "wire=2.1,3.2",
+            "wire=2.1 wire=2.1",
+            "wire=2.1 wire=3.2",
+            "perm=read perm=write",
+        ] {
+            let keys = load(&format!(
+                "{ALG} {} {option} someone\n{ALG} {} perm=read the next line still loads\n",
+                line_key(1),
+                line_key(2),
+            ));
+            assert!(loaded(&keys, 1).is_none(), "{option}: the line must drop");
+            assert!(loaded(&keys, 2).is_some(), "{option}: the next line loads");
+        }
+    }
+
+    /// Once the comment has begun, nothing in it is an option.
+    #[test]
+    fn an_option_written_inside_the_comment_is_a_comment() {
+        let keys = load(&format!(
+            "{ALG} {} perm=read moved off wire=2.1 on 2026-11-12\n",
+            line_key(1),
+        ));
+        let key = loaded(&keys, 1).unwrap();
+        assert_eq!(key.wire, HandshakeVersion::V3);
+        assert_eq!(key.comment, "moved off wire=2.1 on 2026-11-12");
     }
 }

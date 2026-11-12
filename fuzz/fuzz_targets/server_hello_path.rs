@@ -55,20 +55,29 @@ fn setup() -> &'static Setup {
         let dir = std::env::temp_dir().join(format!("pqtg-fuzz-server-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
+        // Two authorized keys, because a key speaks one wire version: `client`
+        // for the signed 3.2 hellos, `legacy` (marked wire=2.1) for the 2.1
+        // template. Wire 2.1 is off by default, so the gateway lists it.
         let client = PqKeyExchange::new().unwrap();
         let mut vks = client.falcon_pk_bytes().to_vec();
         vks.extend_from_slice(client.slh_dsa_pk_bytes());
+        let legacy = PqKeyExchange::new().unwrap();
+        let mut legacy_vks = legacy.falcon_pk_bytes().to_vec();
+        legacy_vks.extend_from_slice(legacy.slh_dsa_pk_bytes());
         let authorized = dir.join("authorized_keys");
         std::fs::write(
             &authorized,
             format!(
-                "falcon512+slh-dsa-shake128f {} perm=read fuzz@client\n",
-                B64.encode(&vks)
+                "falcon512+slh-dsa-shake128f {} perm=read fuzz@client\n\
+                 falcon512+slh-dsa-shake128f {} perm=read wire=2.1 fuzz@legacy\n",
+                B64.encode(&vks),
+                B64.encode(&legacy_vks)
             ),
         )
         .unwrap();
 
         let mut config = ProxyConfig::default();
+        config.proxy.versions = vec!["3.2".to_string(), "2.1".to_string()];
         // Never contacted: the v3 hellos below do not ask for QKD.
         config.qkd.vendor_api = "http://127.0.0.1:9".to_string();
         config.security.authorized_keys = authorized.to_string_lossy().into_owned();
@@ -86,8 +95,8 @@ fn setup() -> &'static Setup {
             version: "2.1".to_string(),
             client_random: random_bytes::<32>(),
             kem_ek: kem_ek.clone(),
-            falcon_vk: client.falcon_pk_bytes().to_vec(),
-            slh_dsa_vk: client.slh_dsa_pk_bytes().to_vec(),
+            falcon_vk: legacy.falcon_pk_bytes().to_vec(),
+            slh_dsa_vk: legacy.slh_dsa_pk_bytes().to_vec(),
             requested_key_size: 32,
         };
         let v2_template = bincode::serialize(&v2).unwrap();

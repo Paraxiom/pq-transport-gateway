@@ -2,6 +2,56 @@
 
 ## Unreleased
 
+### Wire 2.1 is off by default (2026-11-12)
+
+- **Breaking for wire 2.1 clients.** A gateway accepts the wire versions
+  listed in `proxy.versions`, `["3.2"]` by default. A 2.1 hello is refused at
+  its version field unless the operator lists `"2.1"`. A client that still
+  speaks 2.1 also needs `wire=2.1` on its `authorized_keys` line.
+  **Before upgrading a gateway that serves a 2.1 client**, add
+  `versions = ["3.2", "2.1"]` under `[proxy]` and `wire=2.1` to that client's
+  line. Without both the client is refused, and the gateway log says which
+  of the two is missing. A gateway whose clients all speak 3.2 needs no
+  change.
+- **One wire version per key.** A key without the option speaks 3.2 only. A
+  key with `wire=2.1` speaks 2.1 only and is refused on 3.2. When a client
+  moves to 3.2 the operator removes the option.
+- **Why.** The 2.1 hello is not signed. Anyone who knows a client's two
+  public keys can open a 2.1 session in its name, and a key request that
+  client signed once is accepted again in that session, since the signature
+  covers the request bytes only (`docs/THREAT-MODEL.md`, L6). Until now this
+  was a reading of the code. It is now a test:
+  `on_wire_2_1_a_signed_request_is_served_again_to_someone_else` serves a
+  key, twice, to the holder of one signed request and of the public keys.
+  Until now every gateway accepted 2.1, and one `authorized_keys` line
+  admitted a client on both versions, so a request signed in a 3.2 session
+  could be replayed in a 2.1 session too.
+- **What stays open.** A key marked `wire=2.1` on a gateway that lists
+  `"2.1"`. Requests from such keys are not rate limited yet.
+- `authorized_keys`: the options `perm=` and `wire=` may come in either
+  order, each once. A line with a repeated option or a `wire=` value that
+  is not `2.1` or `3.2` is dropped with a warning, so that key is not
+  authorized at all. The comment now begins right after the options: its
+  first word used to be lost on a line without `perm=`.
+- `proxy.versions` is checked at startup: an empty list, a version the
+  gateway does not speak, or a version listed twice stops the gateway with
+  the reason. At startup the gateway logs the versions it accepts and the
+  number of keys for each, and warns when 2.1 is on, when a version is on
+  with no key for it, and when keys are registered for a version that is
+  off.
+- A refusal by the switch is logged and costs the gateway nothing else. A
+  listed key presented on the wrong version is refused before any
+  encapsulation and recorded in the audit log.
+- Tests: `tests/gateway_session.rs` (`wire_2_1_is_refused_by_default`,
+  `a_key_marked_for_2_1_needs_the_gateway_switch_too`,
+  `where_2_1_is_on_each_key_speaks_one_version`, the two replay tests
+  above); `config.rs` (`wire_2_1_is_off_by_default`,
+  `wire_2_1_is_on_only_when_listed`,
+  `a_bad_version_list_is_refused_at_startup`); `auth.rs` (four tests of the
+  `wire=` option); `proxy.rs` (three tests of the two checks). The fuzz
+  target `server_hello_path` lists both versions and uses one key per
+  version, so both hello paths stay reachable.
+
 ### Hello replay guard: the window was one second too short (2026-11-12)
 
 - **The defect.** The gateway admits a v3 hello when its signed timestamp is

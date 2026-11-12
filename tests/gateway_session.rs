@@ -2,6 +2,11 @@
 //! client written from `docs/CLIENT-INTEGRATION.md` for wire 3.2 and 2.1 (one
 //! AES-256-GCM key per direction, strict receive sequencing).
 //!
+//! Wire 2.1 is off unless the gateway lists it in `proxy.versions` and the
+//! client's `authorized_keys` line carries `wire=2.1`. The last section plays
+//! the reason: a key request a client signed once is accepted again in a 2.1
+//! session opened by someone who holds none of that client's secrets.
+//!
 //! The KME is an httpmock emulator, as in `tests/etsi014_emulator.rs`. The
 //! client is allow-listed through a real `authorized_keys` file and the server
 //! identity is persisted, so the client pins it exactly as an integrator
@@ -61,7 +66,36 @@ struct Gateway {
     _dir: TempDir,
 }
 
+/// A gateway with the default setting (wire 3.2 only) and `client` as an
+/// ordinary authorized key.
 async fn start_gateway(client: &PqKeyExchange) -> Gateway {
+    start_gateway_with(client, &["3.2"], "").await
+}
+
+/// A gateway that accepts `versions` (`proxy.versions`), with `client`
+/// authorized by a line that carries `key_options` (`"wire=2.1"`, or nothing
+/// for an ordinary 3.2 key).
+async fn start_gateway_with(
+    client: &PqKeyExchange,
+    versions: &[&str],
+    key_options: &str,
+) -> Gateway {
+    start_gateway_with_keys(
+        client.falcon_pk_bytes(),
+        client.slh_dsa_pk_bytes(),
+        versions,
+        key_options,
+    )
+    .await
+}
+
+/// The same, from the client's two public keys: all an operator ever has.
+async fn start_gateway_with_keys(
+    falcon_vk: &[u8],
+    slh_dsa_vk: &[u8],
+    versions: &[&str],
+    key_options: &str,
+) -> Gateway {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let dir = TempDir(std::env::temp_dir().join(format!(
         "pqtg-gateway-session-{}-{}",
@@ -93,19 +127,25 @@ async fn start_gateway(client: &PqKeyExchange) -> Gateway {
     let key_path = dir.0.join("proxy.key");
     identity.save(&key_path).unwrap();
 
-    let mut vks = client.falcon_pk_bytes().to_vec();
-    vks.extend_from_slice(client.slh_dsa_pk_bytes());
+    let mut vks = falcon_vk.to_vec();
+    vks.extend_from_slice(slh_dsa_vk);
     let authorized = dir.0.join("authorized_keys");
     std::fs::write(
         &authorized,
         format!(
-            "falcon512+slh-dsa-shake128f {} perm=read,write e2e@client\n",
+            "falcon512+slh-dsa-shake128f {} perm=read,write {key_options} e2e@client\n",
             B64.encode(&vks)
         ),
     )
     .unwrap();
 
     let mut config = ProxyConfig::default();
+    assert_eq!(
+        config.proxy.versions,
+        vec!["3.2".to_string()],
+        "the default must be wire 3.2 only"
+    );
+    config.proxy.versions = versions.iter().map(|v| v.to_string()).collect();
     config.qkd.vendor_api = kme.url("");
     config.qkd.key_timeout = 5;
     config.security.authorized_keys = authorized.to_string_lossy().into_owned();
@@ -240,13 +280,26 @@ async fn client_v2(
     pin: &[u8; 32],
     version: &str,
 ) -> Result<PqSession> {
+    client_v2_named(s, me.falcon_pk_bytes(), me.slh_dsa_pk_bytes(), pin, version).await
+}
+
+/// The same handshake from the two public keys alone. The v2 hello is not
+/// signed, so this is all it takes to open a session in a client's name:
+/// whoever runs it ends up holding the session keys.
+async fn client_v2_named(
+    s: &mut TcpStream,
+    falcon_vk: &[u8],
+    slh_dsa_vk: &[u8],
+    pin: &[u8; 32],
+    version: &str,
+) -> Result<PqSession> {
     let kem = EphemeralKemKey::new()?;
     let hello = ClientHello {
         version: version.to_string(),
         client_random: random_bytes::<32>(),
         kem_ek: kem.ek_bytes.clone(),
-        falcon_vk: me.falcon_pk_bytes().to_vec(),
-        slh_dsa_vk: me.slh_dsa_pk_bytes().to_vec(),
+        falcon_vk: falcon_vk.to_vec(),
+        slh_dsa_vk: slh_dsa_vk.to_vec(),
         requested_key_size: 32,
     };
     write_frame(s, &bincode::serialize(&hello)?).await?;
@@ -359,7 +412,7 @@ async fn v3_hybrid_handshake_then_request_and_response() {
 #[tokio::test]
 async fn v2_handshake_then_requests_and_responses() {
     let me = PqKeyExchange::new().unwrap();
-    let gw = start_gateway(&me).await;
+    let gw = start_gateway_with(&me, &["3.2", "2.1"], "wire=2.1").await;
     let mut s = TcpStream::connect(gw.addr).await.unwrap();
     let mut session = client_v2(&mut s, &me, &gw.pin, "2.1").await.unwrap();
     round_trip(&mut s, &mut session, &me).await;
@@ -397,7 +450,7 @@ async fn the_gateway_refuses_a_replayed_request() {
 #[tokio::test]
 async fn the_gateway_refuses_requests_out_of_order() {
     let me = PqKeyExchange::new().unwrap();
-    let gw = start_gateway(&me).await;
+    let gw = start_gateway_with(&me, &["3.2", "2.1"], "wire=2.1").await;
     let mut s = TcpStream::connect(gw.addr).await.unwrap();
     let mut session = client_v2(&mut s, &me, &gw.pin, "2.1").await.unwrap();
 
@@ -466,4 +519,190 @@ async fn older_wire_versions_are_refused_at_the_hello() {
             "{version}: {err}"
         );
     }
+}
+
+// ---- which wire versions a gateway accepts, and for which keys -------------
+
+/// A 2.1 client meets a gateway and gets no session. Returns the gateway's
+/// reason.
+async fn refused_on_2_1(gw: Gateway, falcon_vk: &[u8], slh_dsa_vk: &[u8]) -> String {
+    let mut s = TcpStream::connect(gw.addr).await.unwrap();
+    let err = client_v2_named(&mut s, falcon_vk, slh_dsa_vk, &gw.pin, "2.1")
+        .await
+        .expect_err("a 2.1 hello must get no session here");
+    assert!(err.to_string().contains("closed"), "got: {err}");
+    server_error(gw.outcome).await
+}
+
+/// The default: a gateway refuses a 2.1 hello, also from a client it lists.
+/// The same client is served on 3.2.
+#[tokio::test]
+async fn wire_2_1_is_refused_by_default() {
+    let me = PqKeyExchange::new().unwrap();
+    let reason = refused_on_2_1(
+        start_gateway(&me).await,
+        me.falcon_pk_bytes(),
+        me.slh_dsa_pk_bytes(),
+    )
+    .await;
+    assert!(reason.contains("wire 2.1 is switched off"), "got: {reason}");
+
+    let gw = start_gateway(&me).await;
+    let mut s = TcpStream::connect(gw.addr).await.unwrap();
+    let mut session = client_v3(&mut s, &me, &gw.pin, "3.2", false).await.unwrap();
+    round_trip(&mut s, &mut session, &me).await;
+}
+
+/// Marking a key `wire=2.1` does nothing while the gateway has 2.1 off, and
+/// that key is not a 3.2 key either: the client is refused both ways until
+/// the operator lists 2.1.
+#[tokio::test]
+async fn a_key_marked_for_2_1_needs_the_gateway_switch_too() {
+    let me = PqKeyExchange::new().unwrap();
+    let reason = refused_on_2_1(
+        start_gateway_with(&me, &["3.2"], "wire=2.1").await,
+        me.falcon_pk_bytes(),
+        me.slh_dsa_pk_bytes(),
+    )
+    .await;
+    assert!(reason.contains("wire 2.1 is switched off"), "got: {reason}");
+
+    let gw = start_gateway_with(&me, &["3.2"], "wire=2.1").await;
+    let mut s = TcpStream::connect(gw.addr).await.unwrap();
+    let err = client_v3(&mut s, &me, &gw.pin, "3.2", false)
+        .await
+        .expect_err("a key registered for 2.1 must get no 3.2 session");
+    assert!(err.to_string().contains("closed"), "got: {err}");
+    let reason = server_error(gw.outcome).await;
+    assert!(reason.contains("registered for wire 2.1"), "got: {reason}");
+}
+
+/// Where 2.1 is on for someone, a key that speaks 3.2 still cannot be named
+/// in a 2.1 hello, and a key marked for 2.1 cannot open a 3.2 session.
+#[tokio::test]
+async fn where_2_1_is_on_each_key_speaks_one_version() {
+    // An ordinary key, on a gateway that also serves 2.1 clients.
+    let me = PqKeyExchange::new().unwrap();
+    let reason = refused_on_2_1(
+        start_gateway_with(&me, &["3.2", "2.1"], "").await,
+        me.falcon_pk_bytes(),
+        me.slh_dsa_pk_bytes(),
+    )
+    .await;
+    assert!(
+        reason.contains("registered for wire 3.2 and was presented in a wire 2.1 hello"),
+        "got: {reason}"
+    );
+    let gw = start_gateway_with(&me, &["3.2", "2.1"], "").await;
+    let mut s = TcpStream::connect(gw.addr).await.unwrap();
+    let mut session = client_v3(&mut s, &me, &gw.pin, "3.2", true).await.unwrap();
+    round_trip(&mut s, &mut session, &me).await;
+
+    // A key marked for 2.1, on the same kind of gateway.
+    let legacy = PqKeyExchange::new().unwrap();
+    let gw = start_gateway_with(&legacy, &["3.2", "2.1"], "wire=2.1").await;
+    let mut s = TcpStream::connect(gw.addr).await.unwrap();
+    let err = client_v3(&mut s, &legacy, &gw.pin, "3.2", false)
+        .await
+        .expect_err("a key registered for 2.1 must get no 3.2 session");
+    assert!(err.to_string().contains("closed"), "got: {err}");
+    let reason = server_error(gw.outcome).await;
+    assert!(
+        reason.contains("registered for wire 2.1 and was presented in a wire 3.2 hello"),
+        "got: {reason}"
+    );
+}
+
+// ---- why: a signed request is a reusable token on wire 2.1 -----------------
+
+/// A key request as the client signs it inside a session: the request bytes
+/// and a Falcon-512 signature over those bytes, nothing else. It names no
+/// session, no time and no counter (THREAT-MODEL.md, L6).
+struct SignedRequest {
+    data: Vec<u8>,
+    sig: Vec<u8>,
+}
+
+/// What a client signs when it asks for a key. This is the plaintext of a
+/// request frame, which is what someone who has read one honest frame holds
+/// (a leaked direction key, a second gateway the client talks to, a client
+/// log). The client's signing key is used here and nowhere after.
+fn a_request_the_client_once_signed(client: &PqKeyExchange) -> SignedRequest {
+    let data = bincode::serialize(&KeyRequest {
+        key_id: String::new(),
+        size: 32,
+        purpose: "gateway-session e2e".to_string(),
+    })
+    .unwrap();
+    let sig = client.sign_transcript(&data).unwrap();
+    SignedRequest { data, sig }
+}
+
+/// Seal an already signed request in a session, without any signing key:
+/// nonce(12) || E(len(4) || data || sig), the layout of `sign_and_encrypt`.
+fn seal_signed(session: &mut PqSession, signed: &SignedRequest) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(signed.data.len() as u32).to_be_bytes());
+    payload.extend_from_slice(&signed.data);
+    payload.extend_from_slice(&signed.sig);
+    let (ciphertext, nonce) = session.encrypt(&payload).unwrap();
+    let mut frame = nonce.to_vec();
+    frame.extend_from_slice(&ciphertext);
+    frame
+}
+
+/// The residual that stays with wire 2.1, on a gateway that lists 2.1 for a
+/// client marked `wire=2.1`. Someone who holds one request that client signed,
+/// and its two public keys, opens a 2.1 session in its name and is served a
+/// key, twice from the same signed request. No secret of the client is used
+/// after the request was signed. This is why 2.1 is off by default, and why a
+/// gateway that must keep it should keep it for as few keys and as short a
+/// time as it can.
+#[tokio::test]
+async fn on_wire_2_1_a_signed_request_is_served_again_to_someone_else() {
+    let client = PqKeyExchange::new().unwrap();
+    let signed = a_request_the_client_once_signed(&client);
+    let (falcon_vk, slh_dsa_vk) = (
+        client.falcon_pk_bytes().to_vec(),
+        client.slh_dsa_pk_bytes().to_vec(),
+    );
+    drop(client);
+
+    for _ in 0..2 {
+        let gw =
+            start_gateway_with_keys(&falcon_vk, &slh_dsa_vk, &["3.2", "2.1"], "wire=2.1").await;
+        let mut s = TcpStream::connect(gw.addr).await.unwrap();
+        let mut session = client_v2_named(&mut s, &falcon_vk, &slh_dsa_vk, &gw.pin, "2.1")
+            .await
+            .expect("anyone can open a 2.1 session in a listed client's name");
+        write_frame(&mut s, &seal_signed(&mut session, &signed))
+            .await
+            .unwrap();
+        let response = read_frame(&mut s)
+            .await
+            .expect("the gateway answers the replayed request");
+        open_response(&mut session, &response);
+    }
+}
+
+/// The same holder of the same signed request, against the default gateway
+/// and against a gateway that has 2.1 on for other clients: no session, so
+/// nothing to replay the request in. The client here is an ordinary 3.2 key.
+#[tokio::test]
+async fn a_signed_request_of_a_3_2_client_finds_no_2_1_session() {
+    let client = PqKeyExchange::new().unwrap();
+    let _signed = a_request_the_client_once_signed(&client);
+    let (falcon_vk, slh_dsa_vk) = (
+        client.falcon_pk_bytes().to_vec(),
+        client.slh_dsa_pk_bytes().to_vec(),
+    );
+    drop(client);
+
+    let default = start_gateway_with_keys(&falcon_vk, &slh_dsa_vk, &["3.2"], "").await;
+    let reason = refused_on_2_1(default, &falcon_vk, &slh_dsa_vk).await;
+    assert!(reason.contains("wire 2.1 is switched off"), "got: {reason}");
+
+    let mixed = start_gateway_with_keys(&falcon_vk, &slh_dsa_vk, &["3.2", "2.1"], "").await;
+    let reason = refused_on_2_1(mixed, &falcon_vk, &slh_dsa_vk).await;
+    assert!(reason.contains("registered for wire 3.2"), "got: {reason}");
 }

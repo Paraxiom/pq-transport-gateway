@@ -195,6 +195,10 @@ an SAE ID its key may not name. "Server policy allows QKD for
 `enc_keys` is called. A client that wants no QKD key leaves `client_sae_id`
 empty and needs no list.
 
+When `enc_keys` fails for a listed SAE ID, the answer is still a signed
+`PqcOnly`, as above. Since 2026-11-12 the gateway also raises an alarm for
+its operator (`sae_drained` or `qkd_key_unavailable`, in the audit log).
+
 The server sets `ServerHello.key_mode` authoritatively and signs it (§4). The
 client MUST honor the server's `key_mode`:
 

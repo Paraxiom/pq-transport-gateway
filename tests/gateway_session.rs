@@ -8,8 +8,11 @@
 //! session opened by someone who holds none of that client's secrets.
 //!
 //! A client gets a QKD key only for an SAE ID its own line lists (`sae=`).
-//! The last section plays that too: a client that names another client's SAE
-//! is refused before the key manager is asked for anything.
+//! One section plays that too: a client that names another client's SAE is
+//! refused before the key manager is asked for anything.
+//!
+//! The last sections cover the per-client limits and the alarm the gateway
+//! raises when the key manager gives it no key.
 //!
 //! The KME is an httpmock emulator, as in `tests/etsi014_emulator.rs`. The
 //! client is allow-listed through a real `authorized_keys` file and the server
@@ -34,7 +37,7 @@ use serde_json::json;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -48,6 +51,13 @@ const DELIVERED: [u8; 32] = [0xD7; 32];
 const CLIENT_SAE: &str = "sae-e2e-client";
 const QKD_KEY_ID: &str = "9a9a9a9a-aaaa-bbbb-cccc-ddddeeeeffff";
 const QKD_BYTES: [u8; 32] = [0x5A; 32];
+
+/// Three SAEs the key manager emulator gives no key for (`enc_keys` answers
+/// 503). They differ in what its status says: no key in store, seven keys in
+/// store, or no answer to the status either.
+const DRAINED_SAE: &str = "sae-e2e-drained";
+const REFUSING_SAE: &str = "sae-e2e-refusing";
+const SILENT_SAE: &str = "sae-e2e-silent";
 
 const IO_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -122,6 +132,9 @@ struct Policy<'a> {
     handshakes_per_minute: Option<u32>,
     /// `proxy.client_key_requests_per_minute`, when not the default.
     key_requests_per_minute: Option<u32>,
+    /// The key manager gives no key under the gateway's default SAE, and
+    /// its status reports this many keys in store.
+    default_sae_fails_with_count: Option<u32>,
 }
 
 /// A gateway ready to accept, and what the tests need to know about it.
@@ -236,6 +249,59 @@ async fn start_serving(
     }
 }
 
+/// An ETSI 014 status answer for `sae` with `stored_key_count` keys in store.
+fn status_body(sae: &str, stored_key_count: u32) -> serde_json::Value {
+    json!({
+        "source_KME_ID": "kme-a",
+        "target_KME_ID": "kme-b",
+        "master_SAE_ID": "default-master",
+        "slave_SAE_ID": sae,
+        "key_size": 256,
+        "stored_key_count": stored_key_count,
+        "max_key_count": 1000,
+        "max_key_per_request": 1,
+        "max_key_size": 256,
+        "min_key_size": 256,
+        "max_SAE_ID_count": 0
+    })
+}
+
+/// The audit log of this test process. A process has one, started once;
+/// every gateway of every test here writes to it. Tests that read it look
+/// for records about their own connection.
+fn audit_file() -> &'static PathBuf {
+    static FILE: OnceLock<PathBuf> = OnceLock::new();
+    FILE.get_or_init(|| {
+        let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("gateway-session-audit-{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        pq_qkd_proxy::audit::init(&path.to_string_lossy()).expect("start the audit log");
+        path
+    })
+}
+
+/// The alarms in the audit log about the connection from `peer`. An alarm is
+/// written by a task of its own, after a status call to the key manager, so
+/// this waits until one is there, for a few seconds at most.
+async fn alarms_about(peer: SocketAddr) -> Vec<serde_json::Value> {
+    let peer = peer.to_string();
+    for _ in 0..100 {
+        let text = std::fs::read_to_string(audit_file()).unwrap_or_default();
+        let alarms: Vec<serde_json::Value> = text
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|entry| entry["event_type"] == "alarm")
+            .map(|entry| entry["details"].clone())
+            .filter(|details| details["peer_address"] == peer.as_str())
+            .collect();
+        if !alarms.is_empty() {
+            return alarms;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Vec::new()
+}
+
 /// The key manager emulator, the identity, the `authorized_keys` file and
 /// the `ProxyServer` of a test gateway.
 async fn build_gateway(falcon_vk: &[u8], slh_dsa_vk: &[u8], policy: Policy<'_>) -> Built {
@@ -248,16 +314,53 @@ async fn build_gateway(falcon_vk: &[u8], slh_dsa_vk: &[u8], policy: Policy<'_>) 
     std::fs::create_dir_all(&dir.0).unwrap();
 
     let kme = MockServer::start_async().await;
+    let default_sae_fails = policy.default_sae_fails_with_count;
     let default_sae_route = kme
         .mock_async(|when, then| {
             when.method(POST)
                 .path("/api/v1/keys/default-slave/enc_keys");
-            then.status(200).json_body(json!({
-                "keys": [{ "key_ID": KEY_ID, "key": B64.encode(DELIVERED) }]
-            }));
+            match default_sae_fails {
+                None => then.status(200).json_body(json!({
+                    "keys": [{ "key_ID": KEY_ID, "key": B64.encode(DELIVERED) }]
+                })),
+                Some(_) => then
+                    .status(503)
+                    .json_body(json!({ "message": "no key available" })),
+            };
         })
         .await
         .id;
+    if let Some(count) = default_sae_fails {
+        kme.mock_async(|when, then| {
+            when.method(GET).path("/api/v1/keys/default-slave/status");
+            then.status(200)
+                .json_body(status_body("default-slave", count));
+        })
+        .await;
+    }
+    for (sae, stored) in [
+        (DRAINED_SAE, Some(0)),
+        (REFUSING_SAE, Some(7)),
+        (SILENT_SAE, None),
+    ] {
+        kme.mock_async(|when, then| {
+            when.method(POST)
+                .path(format!("/api/v1/keys/{sae}/enc_keys"));
+            then.status(503)
+                .json_body(json!({ "message": "no key available" }));
+        })
+        .await;
+        kme.mock_async(|when, then| {
+            when.method(GET).path(format!("/api/v1/keys/{sae}/status"));
+            match stored {
+                Some(count) => then.status(200).json_body(status_body(sae, count)),
+                None => then
+                    .status(503)
+                    .json_body(json!({ "message": "status not available" })),
+            };
+        })
+        .await;
+    }
     let client_sae_route = kme
         .mock_async(|when, then| {
             when.method(POST)
@@ -367,6 +470,19 @@ async fn client_v3(
     version: &str,
     hybrid: bool,
 ) -> Result<PqSession> {
+    let sae = if hybrid { Some(CLIENT_SAE) } else { None };
+    client_v3_for(s, me, pin, version, sae).await
+}
+
+/// The same, asking for a QKD key under `sae`, or for none.
+async fn client_v3_for(
+    s: &mut TcpStream,
+    me: &PqKeyExchange,
+    pin: &[u8; 32],
+    version: &str,
+    sae: Option<&str>,
+) -> Result<PqSession> {
+    let hybrid = sae.is_some();
     let kem = EphemeralKemKey::new()?;
     let mut hello = ClientHelloV3 {
         version: version.to_string(),
@@ -375,11 +491,7 @@ async fn client_v3(
         falcon_vk: me.falcon_pk_bytes().to_vec(),
         slh_dsa_vk: me.slh_dsa_pk_bytes().to_vec(),
         requested_key_size: 32,
-        client_sae_id: if hybrid {
-            CLIENT_SAE.to_string()
-        } else {
-            String::new()
-        },
+        client_sae_id: sae.unwrap_or("").to_string(),
         qkd_capable: hybrid,
         timestamp: unix_now(),
         hello_sig: Vec::new(),
@@ -1287,5 +1399,136 @@ async fn on_wire_2_1_the_limit_bounds_what_a_replayed_request_yields() {
     assert!(
         why.contains("over its limit of 2 key requests per minute"),
         "got: {why}"
+    );
+}
+
+// ---- the alarm when the key manager gives no key ---------------------------
+
+/// A hybrid hello for `sae`, from a client whose line lists it, to a gateway
+/// whose key manager gives no key for it. The client is told, by a signed
+/// ServerHello that says PqcOnly, and here it refuses that session. Returns
+/// the alarms the gateway raised about this connection.
+async fn alarms_for_a_hello_naming(sae: &str) -> Vec<serde_json::Value> {
+    audit_file();
+    let me = PqKeyExchange::new().unwrap();
+    let gw = start_gateway_with(&me, &["3.2"], &format!("sae={sae}")).await;
+    let mut s = TcpStream::connect(gw.addr).await.unwrap();
+    let peer = s.local_addr().unwrap();
+    let err = client_v3_for(&mut s, &me, &gw.pin, "3.2", Some(sae))
+        .await
+        .expect_err("no QKD key, so no Hybrid session");
+    assert!(
+        err.to_string().contains("PqcOnly negotiated"),
+        "the client must be told by the ServerHello, got: {err}"
+    );
+    drop(s);
+    alarms_about(peer).await
+}
+
+/// An SAE with no key left. The gateway asks the key manager's status, which
+/// answers and counts zero, and raises `sae_drained` with the SAE, the
+/// client key it was asked for, and the key manager's answer.
+#[tokio::test]
+async fn a_drained_sae_raises_an_alarm() {
+    let alarms = alarms_for_a_hello_naming(DRAINED_SAE).await;
+    assert_eq!(alarms.len(), 1, "one failure, one alarm: {alarms:?}");
+    let alarm = &alarms[0];
+    assert_eq!(alarm["kind"], "sae_drained", "{alarm}");
+    assert_eq!(alarm["sae_id"], DRAINED_SAE, "{alarm}");
+    assert_eq!(alarm["client_key"], "key-0", "{alarm}");
+    assert_eq!(alarm["stored_key_count"], 0, "{alarm}");
+    let reason = alarm["reason"].as_str().unwrap();
+    assert!(reason.contains("503"), "{alarm}");
+    assert!(reason.contains("no key available"), "{alarm}");
+}
+
+/// A key manager that gives no key while it reports keys in store, and one
+/// that does not answer the status either: the gateway does not call either
+/// "drained". Both raise `qkd_key_unavailable`, with what is known.
+#[tokio::test]
+async fn a_key_manager_that_gives_no_key_raises_an_alarm_of_its_own() {
+    let alarms = alarms_for_a_hello_naming(REFUSING_SAE).await;
+    assert_eq!(alarms.len(), 1, "{alarms:?}");
+    assert_eq!(alarms[0]["kind"], "qkd_key_unavailable", "{}", alarms[0]);
+    assert_eq!(alarms[0]["sae_id"], REFUSING_SAE);
+    assert_eq!(alarms[0]["stored_key_count"], 7);
+
+    let alarms = alarms_for_a_hello_naming(SILENT_SAE).await;
+    assert_eq!(alarms.len(), 1, "{alarms:?}");
+    assert_eq!(alarms[0]["kind"], "qkd_key_unavailable", "{}", alarms[0]);
+    assert_eq!(alarms[0]["sae_id"], SILENT_SAE);
+    assert!(alarms[0]["stored_key_count"].is_null(), "{}", alarms[0]);
+}
+
+/// The gateway's default SAE, which every client's key requests draw from,
+/// has no key left. The request gets no answer, the session ends, and the
+/// alarm names the default SAE and the client that asked.
+#[tokio::test]
+async fn a_drained_default_sae_ends_the_session_and_raises_the_alarm() {
+    audit_file();
+    let me = PqKeyExchange::new().unwrap();
+    let gw = start_serving(
+        me.falcon_pk_bytes(),
+        me.slh_dsa_pk_bytes(),
+        Policy {
+            default_sae_fails_with_count: Some(0),
+            ..Policy::default()
+        },
+        1,
+    )
+    .await;
+    let mut s = TcpStream::connect(gw.addr).await.unwrap();
+    let peer = s.local_addr().unwrap();
+    let mut session = client_v3(&mut s, &me, &gw.pin, "3.2", false).await.unwrap();
+    let request = seal_request(&mut session, &me);
+    write_frame(&mut s, &request).await.unwrap();
+    assert!(read_frame(&mut s).await.is_none(), "no key, no answer");
+
+    let outcomes = gw.outcomes.await.unwrap();
+    assert!(
+        reason(&outcomes, 0).contains("503"),
+        "{}",
+        reason(&outcomes, 0)
+    );
+    let alarms = alarms_about(peer).await;
+    assert_eq!(alarms.len(), 1, "{alarms:?}");
+    assert_eq!(alarms[0]["kind"], "sae_drained", "{}", alarms[0]);
+    assert_eq!(alarms[0]["sae_id"], "default-slave");
+    assert_eq!(alarms[0]["client_key"], "key-0");
+    assert_eq!(alarms[0]["stored_key_count"], 0);
+}
+
+/// A session that gets its keys raises no alarm.
+#[tokio::test]
+async fn a_served_session_raises_no_alarm() {
+    audit_file();
+    let me = PqKeyExchange::new().unwrap();
+    let gw = start_gateway_with(&me, &["3.2"], &format!("sae={CLIENT_SAE}")).await;
+    let mut s = TcpStream::connect(gw.addr).await.unwrap();
+    let peer = s.local_addr().unwrap();
+    let mut session = client_v3(&mut s, &me, &gw.pin, "3.2", true).await.unwrap();
+    round_trip(&mut s, &mut session, &me).await;
+    drop(s);
+    gw.outcome.await.unwrap().expect("a clean session");
+
+    // Its other records are there, so the log was being written.
+    let peer_text = peer.to_string();
+    let text = std::fs::read_to_string(audit_file()).unwrap();
+    let mine: Vec<serde_json::Value> = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|entry| entry["details"]["peer_address"] == peer_text.as_str())
+        .collect();
+    assert!(
+        mine.iter().any(|e| e["event_type"] == "qkd_key_used"),
+        "the hybrid handshake is in the audit log"
+    );
+    assert!(
+        mine.iter().any(|e| e["event_type"] == "key_request"),
+        "the key request is in the audit log"
+    );
+    assert!(
+        !mine.iter().any(|e| e["event_type"] == "alarm"),
+        "no alarm for a session that was served"
     );
 }

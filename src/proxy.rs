@@ -31,7 +31,7 @@ use crate::{
         transcript_hash, transcript_hash_v3, HandshakeVersion, PqKeyExchange, PqSession, Role,
         FALCON_512_VK_LEN, MIN_SESSION_FRAME_BYTES, ML_KEM_768_EK_LEN, SLH_DSA_SHAKE128F_VK_LEN,
     },
-    qkd_client::QkdClient,
+    qkd_client::{QkdClient, Status},
     ratelimit::ClientLimiter,
     replay::{ReplayGuard, Verdict},
 };
@@ -59,6 +59,41 @@ pub struct ProxyServer {
     /// Per-client limits on handshakes and on key requests, shared by all
     /// connections: a client does not get a new allowance by reconnecting.
     limits: Arc<ClientLimits>,
+    /// At most one loud log line a minute for each alarm about one SAE. The
+    /// audit log gets every alarm.
+    alarm_lines: Arc<Mutex<ClientLimiter>>,
+}
+
+/// Why the gateway could not draw a QKD key, as far as the key manager says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyAlarm {
+    /// The key manager answers, and reports no key in store for this SAE:
+    /// its keys are used up, by its own client or by someone else.
+    SaeDrained,
+    /// Anything else: the key manager did not answer, refused, or reports
+    /// keys in store and still gave none.
+    KeyUnavailable,
+}
+
+impl KeyAlarm {
+    /// The `kind` of the alarm in the audit log and in the log line.
+    fn kind(self) -> &'static str {
+        match self {
+            KeyAlarm::SaeDrained => "sae_drained",
+            KeyAlarm::KeyUnavailable => "qkd_key_unavailable",
+        }
+    }
+
+    /// Which alarm a failed allocation is, from the key manager's status for
+    /// the SAE, asked right after the failure. Only a status that answers
+    /// and counts zero keys says "drained"; a status that fails says nothing
+    /// about the store.
+    fn from_status(status: &Result<Status>) -> Self {
+        match status {
+            Ok(status) if status.stored_key_count == 0 => KeyAlarm::SaeDrained,
+            _ => KeyAlarm::KeyUnavailable,
+        }
+    }
 }
 
 /// The two per-client limits of a gateway (`src/ratelimit.rs`).
@@ -739,6 +774,7 @@ impl ProxyServer {
             config.proxy.client_handshakes_per_minute, config.proxy.client_key_requests_per_minute
         );
         let limits = Arc::new(ClientLimits::new(&config.proxy));
+        let alarm_lines = Arc::new(Mutex::new(ClientLimiter::per_minute(1)));
         // The guard must remember a hello for the whole interval in which its
         // timestamp is acceptable, which is one second more than 2 × skew:
         // `for_skew` gives the window (see replay.rs).
@@ -753,6 +789,7 @@ impl ProxyServer {
             host_key,
             replay_guard,
             limits,
+            alarm_lines,
         })
     }
 
@@ -818,6 +855,63 @@ impl ProxyServer {
             &established.client_key_id,
         )
         .await
+    }
+
+    /// Raise the alarm for a QKD key the key manager did not give: ask its
+    /// status for the SAE, to tell an empty store from a key manager that
+    /// does not answer, write the alarm to the audit log, and log it loudly,
+    /// at most once a minute for each kind and SAE. Runs on a task of its
+    /// own, so the handshake or the session that met the failure does not
+    /// wait for the status call.
+    fn spawn_key_alarm(
+        &self,
+        peer_addr: &SocketAddr,
+        client_key_id: &str,
+        sae_id: &str,
+        error: &anyhow::Error,
+    ) {
+        let this = self.clone();
+        let peer = *peer_addr;
+        let client_key_id = client_key_id.to_string();
+        let sae_id = sae_id.to_string();
+        let reason = format!("{error:#}");
+        tokio::spawn(async move {
+            let status = this.qkd_client.status(&sae_id).await;
+            let alarm = KeyAlarm::from_status(&status);
+            let stored_key_count = status.as_ref().ok().map(|s| s.stored_key_count);
+            audit::log_alarm(
+                alarm.kind(),
+                serde_json::json!({
+                    "peer_address": peer.to_string(),
+                    "client_key": client_key_id,
+                    "sae_id": sae_id,
+                    "stored_key_count": stored_key_count,
+                    "reason": reason,
+                }),
+            );
+            let loud = this
+                .alarm_lines
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .allow(&format!("{}:{sae_id}", alarm.kind()), Instant::now());
+            let line = match alarm {
+                KeyAlarm::SaeDrained => format!(
+                    "ALARM sae_drained: the key manager has no key left for SAE {sae_id:?} \
+                     (asked for client key {client_key_id}, peer {peer}): {reason}"
+                ),
+                KeyAlarm::KeyUnavailable => format!(
+                    "ALARM qkd_key_unavailable: no QKD key for SAE {sae_id:?} (asked for client \
+                     key {client_key_id}, peer {peer}; keys in store per the key manager: {}): \
+                     {reason}",
+                    stored_key_count.map_or("not known".to_string(), |n| n.to_string())
+                ),
+            };
+            if loud {
+                error!("{line}");
+            } else {
+                debug!("{line} (repeated within the minute)");
+            }
+        });
     }
 
     /// Count one handshake for this client, or refuse it: the client has had
@@ -1055,6 +1149,15 @@ impl ProxyServer {
                         "QKD unavailable for slave SAE {:?} ({e}); negotiating PqcOnly",
                         client_hello.client_sae_id
                     );
+                    // The client asked for a QKD key and gets a session
+                    // without one, which the signed ServerHello tells it.
+                    // The operator is told too.
+                    self.spawn_key_alarm(
+                        peer_addr,
+                        &client_key_id,
+                        &client_hello.client_sae_id,
+                        &e,
+                    );
                     None
                 }
             }
@@ -1144,7 +1247,9 @@ impl ProxyServer {
             })?;
             audit::log_key_request(&peer_addr, &request.key_id, request.size);
 
-            let response = self.process_key_request(request).await?;
+            let response = self
+                .process_key_request(request, &peer_addr, client_key_id)
+                .await?;
             let response_bytes = bincode::serialize(&response)?;
             let encrypted_response =
                 session.sign_and_encrypt(&response_bytes, self.host_key.falcon_signing_key())?;
@@ -1154,11 +1259,30 @@ impl ProxyServer {
         Ok(())
     }
 
-    async fn process_key_request(&self, request: KeyRequest) -> Result<KeyResponse> {
+    async fn process_key_request(
+        &self,
+        request: KeyRequest,
+        peer_addr: &SocketAddr,
+        client_key_id: &str,
+    ) -> Result<KeyResponse> {
         if request.size > self.config.qkd.max_key_size {
             return Err(anyhow!("Requested key size exceeds maximum"));
         }
-        let qkd_key = self.qkd_client.get_key(request.size).await?;
+        let qkd_key = self
+            .qkd_client
+            .get_key(request.size)
+            .await
+            .inspect_err(|e| {
+                // No key under the default SAE, which every client's key
+                // requests draw from: the session ends, and the operator is
+                // told.
+                self.spawn_key_alarm(
+                    peer_addr,
+                    client_key_id,
+                    &self.config.qkd.default_slave_sae_id,
+                    e,
+                );
+            })?;
         let key_id = qkd_key.key_id().to_string();
         Ok(KeyResponse {
             key_id,
@@ -1448,6 +1572,42 @@ mod tests {
             assert!(err.contains("not among the SAE IDs"), "{other:?}: {err}");
             assert!(err.contains("sae-a, sae-b"), "{other:?}: {err}");
         }
+    }
+
+    /// Only a key manager that answers and counts zero keys says "drained".
+    #[test]
+    fn a_failed_allocation_is_a_drained_sae_only_when_the_key_manager_says_so() {
+        fn status(stored_key_count: u32) -> Status {
+            Status {
+                source_KME_ID: "kme-a".to_string(),
+                target_KME_ID: "kme-b".to_string(),
+                master_SAE_ID: "sae-a".to_string(),
+                slave_SAE_ID: "sae-b".to_string(),
+                key_size: 256,
+                stored_key_count,
+                max_key_count: 1000,
+                max_key_per_request: 1,
+                max_key_size: 256,
+                min_key_size: 256,
+                max_SAE_ID_count: 0,
+                status_extension: None,
+            }
+        }
+        assert_eq!(KeyAlarm::from_status(&Ok(status(0))), KeyAlarm::SaeDrained);
+        assert_eq!(
+            KeyAlarm::from_status(&Ok(status(1))),
+            KeyAlarm::KeyUnavailable
+        );
+        assert_eq!(
+            KeyAlarm::from_status(&Ok(status(1000))),
+            KeyAlarm::KeyUnavailable
+        );
+        assert_eq!(
+            KeyAlarm::from_status(&Err(anyhow!("connection refused"))),
+            KeyAlarm::KeyUnavailable
+        );
+        assert_eq!(KeyAlarm::SaeDrained.kind(), "sae_drained");
+        assert_eq!(KeyAlarm::KeyUnavailable.kind(), "qkd_key_unavailable");
     }
 
     /// The two limiters take their limits from the configuration, count each

@@ -152,6 +152,12 @@ falcon512+slh-dsa-shake128f <base64(falcon_vk(897) || slh_dsa_vk(32))> perm=read
   `audit_checkpoint_secs` seconds; `--verify-audit-log` checks a log. The key is a file
   on the same host, so this catches changes made without it, not by whoever controls the
   host, and events after the last checkpoint are not signed yet (`docs/THREAT-MODEL.md` T9)
+- **Alarms**: when the key manager gives the gateway no QKD key, the gateway asks its
+  status for that SAE and writes an `alarm` record to the audit log: `sae_drained` when
+  the key manager reports no key in store, `qkd_key_unavailable` otherwise. The record
+  names the SAE and the client key it was asked for. The same goes to the log as an
+  `ALARM` line, at most once a minute for each kind and SAE. An alert on
+  `"event_type":"alarm"` catches every one
 - **Standards status**: Falcon-512 (FN-DSA, FIPS 206) is still a draft standard, and it is
   the only signature algorithm the protocol uses (server transcript, v3 client hello,
   per-frame signatures). Clients also present an SLH-DSA-Shake128f (FIPS 205) key, but it

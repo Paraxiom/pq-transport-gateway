@@ -406,6 +406,17 @@ pub fn log_rate_limited(peer: &SocketAddr, client_key: &str, what: &str, per_min
     );
 }
 
+/// Something an operator should look at now, as opposed to a refusal the
+/// gateway handled. `kind` names it (`sae_drained`, `qkd_key_unavailable`);
+/// `details` says what and for whom. An alert on `"event_type":"alarm"` in
+/// this log catches every one.
+pub fn log_alarm(kind: &str, mut details: Value) {
+    if let Value::Object(map) = &mut details {
+        map.insert("kind".to_string(), Value::String(kind.to_string()));
+    }
+    write_entry("alarm", details);
+}
+
 /// Audit-log helper for unexpected internal errors. Currently called only
 /// from rare paths; `#[allow(dead_code)]` because the bin's hot path goes
 /// through `tracing::error!` instead.

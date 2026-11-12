@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### An alarm when the key manager gives no QKD key (2026-11-12)
+
+- When a QKD key cannot be drawn, for the SAE a hybrid hello names or for
+  the default SAE of a key request, the gateway asks the key manager's
+  status for that SAE and writes an `alarm` record to the audit log:
+  `sae_drained` when the status answers and counts no key in store,
+  `qkd_key_unavailable` otherwise (no answer, a refusal, or keys in store
+  and still none given). The record carries the SAE, the client key it was
+  asked for, the peer, the count if known and the key manager's answer.
+- The same is logged as an `ALARM` line at error level, at most once a
+  minute for each kind and SAE; the audit log gets every alarm.
+- **Why.** A client whose SAE had no key left got a session without QKD,
+  and the only trace on the gateway was a WARN line. An SAE used up by
+  someone else looked the same as a quiet day.
+- What the client sees is unchanged: a signed `PqcOnly` ServerHello for a
+  hello, and the end of the session for a key request. The alarm runs on a
+  task of its own, so neither waits for the status call.
+- The alarm reports. It does not refill anything, and it is raised after
+  the failure, not when the store runs low.
+- Tests: `tests/gateway_session.rs`, which now starts an audit log for the
+  test process and reads it (`a_drained_sae_raises_an_alarm`,
+  `a_key_manager_that_gives_no_key_raises_an_alarm_of_its_own`,
+  `a_drained_default_sae_ends_the_session_and_raises_the_alarm`,
+  `a_served_session_raises_no_alarm`); `proxy.rs`, the rule that only a
+  status counting zero keys says "drained".
+
 ### Per-client limits on handshakes and key requests (2026-11-12)
 
 - Two settings under `[proxy]`, both per client key and per minute:

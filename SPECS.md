@@ -221,9 +221,12 @@ Semantic versioning. Wire-format compatibility:
 - **Minor bump** for backward-compatible feature additions.
 - **Patch bump** for bug fixes and non-protocol-breaking improvements.
 
-Current version: `3.0.0` (see `Cargo.toml` and `CHANGELOG.md`). It broke 2.0.0
-at the wire (gateway `2.1` / `3.2`) to fix nonce reuse in the gateway session;
-2.0.0 is superseded; do not use it.
+Current version: `3.1.0` (see `Cargo.toml` and `CHANGELOG.md`). 3.0.0 broke
+2.0.0 at the wire (gateway `2.1` / `3.2`) to fix nonce reuse in the gateway
+session; 2.0.0 is superseded; do not use it. 3.1.0 changes no wire format: it
+adds settings, turns wire `2.1` off by default and binds SAE IDs to client
+keys, so a gateway that serves a 2.1 client or a hybrid client needs one
+line set before the upgrade (`CHANGELOG.md`).
 
 ---
 

@@ -184,7 +184,13 @@ lake build
 
 ## Status
 
-This is `3.0.0`. **`2.0.0` must not be used**: its gateway session sealed
+This is `3.1.0`. It turns wire `2.1` off by default, binds SAE IDs to client
+keys and limits each client's handshakes and key requests; **`3.0.0` should
+be upgraded** (advisory of 2026-11-12 in `SECURITY.md`, and "Before
+upgrading from 3.0.0" in `CHANGELOG.md`). It speaks the same wire versions
+as `3.0.0`.
+
+**`2.0.0` must not be used**: its gateway session sealed
 both directions under one AES-GCM key with nonces counted from 0 on each
 side, so a request and the response at the same position shared a key and
 nonce (advisory of 2026-10-14 in `SECURITY.md`). `3.0.0` gives each
@@ -197,7 +203,7 @@ Despite the major number, this should still be considered **pre-stable**:
 the major version counts wire breaks, not maturity. Open issues track
 production gaps including mutual auth and DoS hardening, and known limits
 are listed in `docs/THREAT-MODEL.md` (§6). It has not been externally
-audited. Pin exactly (`= "3.0.0"`) if you depend on this for anything
+audited. Pin exactly (`= "3.1.0"`) if you depend on this for anything
 load-bearing.
 
 ## License

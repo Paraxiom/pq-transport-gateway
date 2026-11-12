@@ -1,6 +1,26 @@
 # Changelog
 
-## Unreleased
+## 3.1.0 (not released yet)
+
+3.1.0 closes what was open on the gateway side of 3.0.0 (advisory of
+2026-11-12 in `SECURITY.md`). It speaks the same wire versions as 3.0.0,
+`3.2` and, where switched on, `2.1`, and the same relay version. Nothing
+changes for a client that speaks `3.2`, asks for no QKD key and stays under
+the limits.
+
+### Before upgrading from 3.0.0
+
+1. **A client that speaks wire 2.1.** Add `versions = ["3.2", "2.1"]` under
+   `[proxy]`, and `wire=2.1` to that client's `authorized_keys` line.
+   Without both it is refused.
+2. **A client that asks for a QKD key (a hybrid session).** Add
+   `sae=<its SAE ID>` to its `authorized_keys` line. Without it, its hybrid
+   hello is refused.
+3. **A client that makes more than 120 key requests a minute, or more than
+   30 handshakes a minute.** Raise `client_key_requests_per_minute` or
+   `client_handshakes_per_minute` under `[proxy]`.
+
+For each refusal the gateway's log says which of these is missing.
 
 ### An alarm when the key manager gives no QKD key (2026-11-12)
 

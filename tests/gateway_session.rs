@@ -3,9 +3,13 @@
 //! AES-256-GCM key per direction, strict receive sequencing).
 //!
 //! Wire 2.1 is off unless the gateway lists it in `proxy.versions` and the
-//! client's `authorized_keys` line carries `wire=2.1`. The last section plays
-//! the reason: a key request a client signed once is accepted again in a 2.1
+//! client's `authorized_keys` line carries `wire=2.1`. One section plays the
+//! reason: a key request a client signed once is accepted again in a 2.1
 //! session opened by someone who holds none of that client's secrets.
+//!
+//! A client gets a QKD key only for an SAE ID its own line lists (`sae=`).
+//! The last section plays that too: a client that names another client's SAE
+//! is refused before the key manager is asked for anything.
 //!
 //! The KME is an httpmock emulator, as in `tests/etsi014_emulator.rs`. The
 //! client is allow-listed through a real `authorized_keys` file and the server
@@ -62,8 +66,21 @@ struct Gateway {
     pin: [u8; 32],
     /// What `handle_connection` returned for that connection.
     outcome: JoinHandle<Result<()>>,
-    _kme: MockServer,
+    /// The key manager's route for `CLIENT_SAE`, to count the keys drawn for
+    /// that SAE.
+    client_sae_route: usize,
+    kme: MockServer,
     _dir: TempDir,
+}
+
+impl Gateway {
+    /// How many keys the gateway has asked the key manager for under
+    /// `CLIENT_SAE`.
+    async fn keys_drawn_for_client_sae(&self) -> usize {
+        httpmock::Mock::new(self.client_sae_route, &self.kme)
+            .hits_async()
+            .await
+    }
 }
 
 /// A gateway with the default setting (wire 3.2 only) and `client` as an
@@ -113,14 +130,16 @@ async fn start_gateway_with_keys(
         }));
     })
     .await;
-    kme.mock_async(|when, then| {
-        when.method(POST)
-            .path(format!("/api/v1/keys/{CLIENT_SAE}/enc_keys"));
-        then.status(200).json_body(json!({
-            "keys": [{ "key_ID": QKD_KEY_ID, "key": B64.encode(QKD_BYTES) }]
-        }));
-    })
-    .await;
+    let client_sae_route = kme
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path(format!("/api/v1/keys/{CLIENT_SAE}/enc_keys"));
+            then.status(200).json_body(json!({
+                "keys": [{ "key_ID": QKD_KEY_ID, "key": B64.encode(QKD_BYTES) }]
+            }));
+        })
+        .await
+        .id;
 
     let identity = PqKeyExchange::new().unwrap();
     let pin = identity.identity_fingerprint();
@@ -162,7 +181,8 @@ async fn start_gateway_with_keys(
         addr,
         pin,
         outcome,
-        _kme: kme,
+        client_sae_route,
+        kme,
         _dir: dir,
     }
 }
@@ -397,12 +417,17 @@ async fn v3_pqc_only_handshake_then_requests_and_responses() {
 #[tokio::test]
 async fn v3_hybrid_handshake_then_request_and_response() {
     let me = PqKeyExchange::new().unwrap();
-    let gw = start_gateway(&me).await;
+    let gw = start_gateway_with(&me, &["3.2"], &format!("sae={CLIENT_SAE}")).await;
     let mut s = TcpStream::connect(gw.addr).await.unwrap();
     let mut session = client_v3(&mut s, &me, &gw.pin, "3.2", true).await.unwrap();
     round_trip(&mut s, &mut session, &me).await;
     round_trip(&mut s, &mut session, &me).await;
     drop(s);
+    assert_eq!(
+        gw.keys_drawn_for_client_sae().await,
+        1,
+        "one QKD key for the handshake, under the client's own SAE"
+    );
     gw.outcome
         .await
         .unwrap()
@@ -593,7 +618,7 @@ async fn where_2_1_is_on_each_key_speaks_one_version() {
         reason.contains("registered for wire 3.2 and was presented in a wire 2.1 hello"),
         "got: {reason}"
     );
-    let gw = start_gateway_with(&me, &["3.2", "2.1"], "").await;
+    let gw = start_gateway_with(&me, &["3.2", "2.1"], &format!("sae={CLIENT_SAE}")).await;
     let mut s = TcpStream::connect(gw.addr).await.unwrap();
     let mut session = client_v3(&mut s, &me, &gw.pin, "3.2", true).await.unwrap();
     round_trip(&mut s, &mut session, &me).await;
@@ -705,4 +730,119 @@ async fn a_signed_request_of_a_3_2_client_finds_no_2_1_session() {
     let mixed = start_gateway_with_keys(&falcon_vk, &slh_dsa_vk, &["3.2", "2.1"], "").await;
     let reason = refused_on_2_1(mixed, &falcon_vk, &slh_dsa_vk).await;
     assert!(reason.contains("registered for wire 3.2"), "got: {reason}");
+}
+
+// ---- a QKD key only for an SAE ID of the client's own line -----------------
+
+/// A hybrid hello meets a gateway and gets no session. Returns the gateway's
+/// reason, and how many keys were drawn under `CLIENT_SAE`.
+async fn refused_hybrid(gw: Gateway, me: &PqKeyExchange) -> (String, usize) {
+    let mut s = TcpStream::connect(gw.addr).await.unwrap();
+    let err = client_v3(&mut s, me, &gw.pin, "3.2", true)
+        .await
+        .expect_err("this client must get no session when it names that SAE");
+    assert!(err.to_string().contains("closed"), "got: {err}");
+    let Gateway {
+        outcome,
+        client_sae_route,
+        kme,
+        _dir,
+        ..
+    } = gw;
+    let reason = server_error(outcome).await;
+    let drawn = httpmock::Mock::new(client_sae_route, &kme)
+        .hits_async()
+        .await;
+    (reason, drawn)
+}
+
+/// The default for a key whose line lists no SAE: it gets no QKD key. Its
+/// hello is refused when it names an SAE, with what to add, and the key
+/// manager is not asked. The same client is served when it asks for none.
+#[tokio::test]
+async fn a_key_with_no_sae_list_gets_no_qkd_key() {
+    let me = PqKeyExchange::new().unwrap();
+    let (reason, drawn) = refused_hybrid(start_gateway(&me).await, &me).await;
+    assert!(reason.contains("lists no SAE"), "got: {reason}");
+    assert!(
+        reason.contains(&format!("sae={CLIENT_SAE}")),
+        "got: {reason}"
+    );
+    assert_eq!(drawn, 0, "no key may be drawn for a refused hello");
+
+    let gw = start_gateway(&me).await;
+    let mut s = TcpStream::connect(gw.addr).await.unwrap();
+    let mut session = client_v3(&mut s, &me, &gw.pin, "3.2", false).await.unwrap();
+    round_trip(&mut s, &mut session, &me).await;
+    assert_eq!(gw.keys_drawn_for_client_sae().await, 0);
+}
+
+/// What the list is for. A client whose line lists its own SAE names another
+/// client's SAE (`CLIENT_SAE`, which the key manager would serve). Before the
+/// list existed the gateway drew a key under that SAE for it, and a client
+/// could use up another client's keys that way. Now the hello is refused and
+/// nothing is drawn.
+#[tokio::test]
+async fn a_client_cannot_draw_keys_under_another_clients_sae() {
+    let me = PqKeyExchange::new().unwrap();
+    let gw = start_gateway_with(&me, &["3.2"], "sae=sae-of-this-client,sae-second").await;
+    let (reason, drawn) = refused_hybrid(gw, &me).await;
+    assert!(reason.contains("not among the SAE IDs"), "got: {reason}");
+    assert!(
+        reason.contains("sae-of-this-client, sae-second"),
+        "got: {reason}"
+    );
+    assert_eq!(drawn, 0, "the other client's SAE must not be touched");
+
+    // A near miss is a miss: the list is matched exactly.
+    for near in [
+        format!("sae={CLIENT_SAE}-2"),
+        format!("sae={}", CLIENT_SAE.to_uppercase()),
+        format!("sae={}", &CLIENT_SAE[..CLIENT_SAE.len() - 1]),
+    ] {
+        let gw = start_gateway_with(&me, &["3.2"], &near).await;
+        let (reason, drawn) = refused_hybrid(gw, &me).await;
+        assert!(reason.contains("not among the SAE IDs"), "{near}: {reason}");
+        assert_eq!(drawn, 0, "{near}");
+    }
+}
+
+/// The refusal comes after the signature check: a hello that names a listed
+/// client and another SAE, sent by someone who does not hold that client's
+/// key, is refused for its signature and never reaches the SAE check.
+#[tokio::test]
+async fn an_unsigned_hello_is_refused_before_the_sae_check() {
+    let me = PqKeyExchange::new().unwrap();
+    let stranger = PqKeyExchange::new().unwrap();
+    let gw = start_gateway_with(&me, &["3.2"], "sae=sae-of-this-client").await;
+    let mut s = TcpStream::connect(gw.addr).await.unwrap();
+
+    // The listed client's public keys, a hybrid request for CLIENT_SAE, and
+    // a signature made with the stranger's key.
+    let kem = EphemeralKemKey::new().unwrap();
+    let mut hello = ClientHelloV3 {
+        version: "3.2".to_string(),
+        client_random: random_bytes::<32>(),
+        kem_ek: kem.ek_bytes.clone(),
+        falcon_vk: stranger.falcon_pk_bytes().to_vec(),
+        slh_dsa_vk: stranger.slh_dsa_pk_bytes().to_vec(),
+        requested_key_size: 32,
+        client_sae_id: CLIENT_SAE.to_string(),
+        qkd_capable: true,
+        timestamp: unix_now(),
+        hello_sig: Vec::new(),
+    };
+    hello.sign(&stranger).unwrap();
+    hello.falcon_vk = me.falcon_pk_bytes().to_vec();
+    hello.slh_dsa_vk = me.slh_dsa_pk_bytes().to_vec();
+    write_frame(&mut s, &bincode::serialize(&hello).unwrap())
+        .await
+        .unwrap();
+    assert!(read_frame(&mut s).await.is_none(), "no ServerHello");
+
+    let drawn = gw.keys_drawn_for_client_sae().await;
+    let reason = server_error(gw.outcome).await;
+    assert!(reason.contains("signature"), "got: {reason}");
+    assert!(!reason.contains("SAE"), "got: {reason}");
+    assert_eq!(drawn, 0);
 }

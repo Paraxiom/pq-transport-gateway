@@ -314,6 +314,44 @@ fn check_key_wire(key: &AuthorizedKey, version: HandshakeVersion) -> Result<()> 
     ))
 }
 
+/// May this authorized key name this SAE ID in its hello? Only an SAE ID its
+/// own `authorized_keys` line lists (`sae=`). A key with no list gets no QKD
+/// key: the hello is refused, it does not become a session without QKD,
+/// since a client that asked for a QKD key must be told it got none.
+fn check_sae_binding(key: &AuthorizedKey, sae_id: &str) -> Result<()> {
+    if key.may_name_sae(sae_id) {
+        return Ok(());
+    }
+    if key.sae_ids.is_empty() {
+        return Err(anyhow!(
+            "client key {} named SAE {sae_id:?} and its authorized_keys line lists no SAE: add \
+             sae={sae_id} to that line if this client may use that SAE's keys",
+            key.key_id
+        ));
+    }
+    Err(anyhow!(
+        "client key {} named SAE {sae_id:?}, which is not among the SAE IDs of its \
+         authorized_keys line ({})",
+        key.key_id,
+        key.sae_ids.join(", ")
+    ))
+}
+
+/// Say at startup how many keys may ask for a QKD key, and name every SAE ID
+/// that more than one key lists.
+fn log_sae_policy(authenticator: &Authenticator) {
+    info!(
+        "{} of {} authorized key(s) may ask for a QKD key (sae= on their line)",
+        authenticator.count_with_sae_ids(),
+        authenticator.authorized_count()
+    );
+    for (sae_id, keys) in authenticator.shared_sae_ids() {
+        warn!(
+            "SAE {sae_id:?} is listed by {keys} authorized keys: each of them can use up its keys"
+        );
+    }
+}
+
 /// Say at startup which wire versions are on and how many keys can use each,
 /// and warn about every combination in which a client will be refused or in
 /// which wire 2.1 is open.
@@ -638,6 +676,7 @@ impl ProxyServer {
         let qkd_client = QkdClient::new(&config)?;
         let authenticator = Authenticator::new(&config)?;
         log_wire_policy(&config.proxy, &authenticator);
+        log_sae_policy(&authenticator);
         // The guard must remember a hello for the whole interval in which its
         // timestamp is acceptable, which is one second more than 2 × skew:
         // `for_skew` gives the window (see replay.rs).
@@ -744,7 +783,7 @@ impl ProxyServer {
         falcon_vk: &[u8],
         slh_dsa_vk: &[u8],
         peer_addr: &SocketAddr,
-    ) -> Result<()> {
+    ) -> Result<&AuthorizedKey> {
         if kem_ek.len() != ML_KEM_768_EK_LEN {
             return Err(anyhow!(
                 "ClientHello.kem_ek wrong size: expected {} bytes, got {}",
@@ -783,7 +822,7 @@ impl ProxyServer {
                     wire_name(version),
                     peer_addr
                 );
-                Ok(())
+                Ok(auth_key)
             }
             Err(e) => {
                 audit::log_auth_failure(peer_addr, &e.to_string());
@@ -847,7 +886,7 @@ impl ProxyServer {
             crate::qkd_client::validate_sae_id(&client_hello.client_sae_id)
                 .map_err(|e| anyhow!("ClientHello.client_sae_id refused: {e}"))?;
         }
-        self.validate_and_authorize(
+        let client_key = self.validate_and_authorize(
             HandshakeVersion::V3,
             &client_hello.kem_ek,
             &client_hello.falcon_vk,
@@ -871,6 +910,18 @@ impl ProxyServer {
             audit::log_auth_failure(peer_addr, &e.to_string());
             warn!("Rejected client {}: {}", peer_addr, e);
             return Err(anyhow!("ClientHello refused: {e}"));
+        }
+
+        // ── The SAE ID belongs to this client ───────────────────────────────
+        // After the signature, so the refusal is about the client that holds
+        // the key, and before any key is asked of the key manager. A hello
+        // with no SAE ID asks for no QKD key and needs no list.
+        if !client_hello.client_sae_id.is_empty() {
+            if let Err(e) = check_sae_binding(client_key, &client_hello.client_sae_id) {
+                audit::log_auth_failure(peer_addr, &e.to_string());
+                warn!("Rejected client {}: {}", peer_addr, e);
+                return Err(anyhow!("ClientHello refused: {e}"));
+            }
         }
 
         // ── QKD negotiation (spec §5) — after authorization, before transcript
@@ -1180,6 +1231,7 @@ mod tests {
             permissions: vec!["read".to_string()],
             comment: String::new(),
             wire,
+            sae_ids: Vec::new(),
         }
     }
 
@@ -1238,6 +1290,25 @@ mod tests {
                 .contains("registered for wire 2.1 and was presented in a wire 3.2 hello"),
             "got: {err}"
         );
+    }
+
+    /// A key may name an SAE ID of its own line and no other. The refusal
+    /// says which case it is, and what to add when the line lists none.
+    #[test]
+    fn a_key_may_name_only_the_sae_ids_of_its_own_line() {
+        let mut key = authorized_key(HandshakeVersion::V3);
+        let err = check_sae_binding(&key, "sae-a").unwrap_err().to_string();
+        assert!(err.contains("lists no SAE"), "got: {err}");
+        assert!(err.contains("sae=sae-a"), "got: {err}");
+
+        key.sae_ids = vec!["sae-a".to_string(), "sae-b".to_string()];
+        check_sae_binding(&key, "sae-a").unwrap();
+        check_sae_binding(&key, "sae-b").unwrap();
+        for other in ["sae-c", "sae-a2", "sae", "SAE-A", ""] {
+            let err = check_sae_binding(&key, other).unwrap_err().to_string();
+            assert!(err.contains("not among the SAE IDs"), "{other:?}: {err}");
+            assert!(err.contains("sae-a, sae-b"), "{other:?}: {err}");
+        }
     }
 
     /// The version strings of the setting, of the `wire=` option and of the

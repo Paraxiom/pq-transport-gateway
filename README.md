@@ -130,6 +130,14 @@ its line. That key is then refused on `3.2`.
 falcon512+slh-dsa-shake128f <base64(falcon_vk(897) || slh_dsa_vk(32))> perm=read wire=2.1 legacy-client@example.com
 ```
 
+A client gets a QKD key (a hybrid session) only under an SAE ID its line
+lists with `sae=`. A hello that names any other SAE ID is refused, and a key
+with no list gets no QKD key. Sessions without QKD need no list.
+
+```
+falcon512+slh-dsa-shake128f <base64(falcon_vk(897) || slh_dsa_vk(32))> perm=read sae=sae-102 site-102@example.com
+```
+
 ## Security properties
 
 - **No external TLS**: vendor TLS stays on `127.0.0.1`

@@ -372,7 +372,7 @@ fn generate_proxy_keys() -> Result<()> {
 
     if !Path::new(&auth_keys_path).exists() {
         let template = r#"# PQTG Authorized Keys
-# Format: algorithm base64(falcon_vk(897) || slh_dsa_shake128f_vk(32)) [perm=a,b] [wire=2.1] comment
+# Format: algorithm base64(falcon_vk(897) || slh_dsa_shake128f_vk(32)) [perm=a,b] [wire=2.1] [sae=a,b] comment
 #
 # Example:
 # falcon512+slh-dsa-shake128f <base64-encoded-public-keys> perm=read,write client@example.com
@@ -381,6 +381,10 @@ fn generate_proxy_keys() -> Result<()> {
 # to its line AND list "2.1" in proxy.versions; that key is then refused on
 # 3.2. Wire 2.1 is off by default: its hello is not signed.
 # falcon512+slh-dsa-shake128f <base64-encoded-public-keys> perm=read wire=2.1 legacy@example.com
+#
+# A client gets a QKD key only under an SAE ID its line lists with sae=.
+# A key with no list gets none; sessions without QKD need no list.
+# falcon512+slh-dsa-shake128f <base64-encoded-public-keys> perm=read sae=sae-102 site-102@example.com
 "#;
         fs::write(&auth_keys_path, template)?;
         let mut perms = fs::metadata(&auth_keys_path)?.permissions();

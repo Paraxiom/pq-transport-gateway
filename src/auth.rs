@@ -30,6 +30,20 @@ pub struct AuthorizedKey {
     /// 3.2 session would otherwise be accepted again in a 2.1 session, whose
     /// hello anyone can send in this client's name.
     pub wire: HandshakeVersion,
+    /// The SAE IDs this key may name in a hello, from `sae=a,b` on its line.
+    /// Empty when the line has no such option: the key then gets no QKD key,
+    /// and a hello from it that names an SAE is refused. Without this list
+    /// any authorized client could name any SAE and use up the keys of
+    /// another client.
+    pub sae_ids: Vec<String>,
+}
+
+impl AuthorizedKey {
+    /// May this key name `sae_id` in a hello? Exact match with an entry of
+    /// its own list.
+    pub fn may_name_sae(&self, sae_id: &str) -> bool {
+        self.sae_ids.iter().any(|s| s == sae_id)
+    }
 }
 
 impl Authenticator {
@@ -65,6 +79,34 @@ impl Authenticator {
             .count()
     }
 
+    /// Number of authorized keys that may ask for a QKD key: those whose
+    /// line lists at least one SAE ID.
+    pub fn count_with_sae_ids(&self) -> usize {
+        self.authorized_keys
+            .values()
+            .filter(|k| !k.sae_ids.is_empty())
+            .count()
+    }
+
+    /// The SAE IDs listed by more than one key, each with the number of keys
+    /// that list it, sorted by name. Each of those keys can use up that
+    /// SAE's keys, so the operator is told at startup.
+    pub fn shared_sae_ids(&self) -> Vec<(String, usize)> {
+        let mut owners: HashMap<&str, usize> = HashMap::new();
+        for key in self.authorized_keys.values() {
+            for sae in &key.sae_ids {
+                *owners.entry(sae.as_str()).or_insert(0) += 1;
+            }
+        }
+        let mut shared: Vec<(String, usize)> = owners
+            .into_iter()
+            .filter(|(_, n)| *n > 1)
+            .map(|(sae, n)| (sae.to_string(), n))
+            .collect();
+        shared.sort();
+        shared
+    }
+
     fn load_authorized_keys(path: &str) -> Result<HashMap<String, AuthorizedKey>> {
         let mut keys = HashMap::new();
 
@@ -83,7 +125,7 @@ impl Authenticator {
                 continue;
             }
 
-            // Parse line: algorithm key_data [perm=a,b] [wire=2.1] comment
+            // Parse line: algorithm key_data [perm=a,b] [wire=2.1] [sae=a,b] comment
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() < 3 {
                 warn!(
@@ -126,11 +168,11 @@ impl Authenticator {
             let falcon_pk = decoded[..FALCON_VK_LEN].to_vec();
             let sphincs_pk = decoded[FALCON_VK_LEN..FALCON_VK_LEN + SLH_DSA_VK_LEN].to_vec();
 
-            // Options, in either order, then the comment. A line whose
+            // Options, in any order, then the comment. A line whose
             // options cannot be read is dropped, like any other malformed
             // line: the key is then not authorized at all, which fails
             // closed. In particular a mistyped `wire=` never turns into the
-            // default.
+            // default, and a malformed `sae=` never turns into another SAE.
             let options = match parse_options(&parts[2..]) {
                 Ok(o) => o,
                 Err(e) => {
@@ -142,6 +184,14 @@ impl Authenticator {
                 .permissions
                 .unwrap_or_else(|| vec!["read".to_string()]);
             let wire = options.wire.unwrap_or(HandshakeVersion::V3);
+            let sae_ids = options.sae_ids.unwrap_or_default();
+            if wire == HandshakeVersion::V2 && !sae_ids.is_empty() {
+                warn!(
+                    "authorized_keys line {}: sae= has no effect on a wire {WIRE_2_1} key, \
+                     whose hello names no SAE",
+                    line_no + 1
+                );
+            }
             let comment = parts[2 + options.consumed..].join(" ");
 
             let key_id = format!("key-{line_no}");
@@ -155,6 +205,7 @@ impl Authenticator {
                     permissions,
                     comment,
                     wire,
+                    sae_ids,
                 },
             );
         }
@@ -187,17 +238,19 @@ impl Authenticator {
 struct LineOptions {
     permissions: Option<Vec<String>>,
     wire: Option<HandshakeVersion>,
+    sae_ids: Option<Vec<String>>,
     /// How many tokens were options; the comment starts after them.
     consumed: usize,
 }
 
-/// Read `perm=a,b` and `wire=2.1` (or `wire=3.2`) from the start of `tokens`,
-/// in either order, each at most once. The first token that is neither ends
-/// the options.
+/// Read `perm=a,b`, `wire=2.1` (or `wire=3.2`) and `sae=a,b` from the start
+/// of `tokens`, in any order, each at most once. The first token that is
+/// none of them ends the options.
 fn parse_options(tokens: &[&str]) -> Result<LineOptions> {
     let mut options = LineOptions {
         permissions: None,
         wire: None,
+        sae_ids: None,
         consumed: 0,
     };
     for token in tokens {
@@ -220,6 +273,22 @@ fn parse_options(tokens: &[&str]) -> Result<LineOptions> {
                     ))
                 }
             });
+        } else if let Some(list) = token.strip_prefix("sae=") {
+            if options.sae_ids.is_some() {
+                return Err(anyhow!("sae= given twice"));
+            }
+            // Each entry is an SAE ID as the key manager URL takes it; the
+            // same check as for an SAE ID in a hello. An empty entry (`sae=`,
+            // `sae=a,,b`) fails it.
+            let mut ids: Vec<String> = Vec::new();
+            for id in list.split(',') {
+                crate::qkd_client::validate_sae_id(id)
+                    .map_err(|e| anyhow!("sae={list}: {id:?} is not an SAE ID ({e})"))?;
+                if !ids.iter().any(|known| known == id) {
+                    ids.push(id.to_string());
+                }
+            }
+            options.sae_ids = Some(ids);
         } else {
             break;
         }
@@ -240,6 +309,7 @@ mod tests {
             permissions: perms.into_iter().map(String::from).collect(),
             comment: String::new(),
             wire: HandshakeVersion::V3,
+            sae_ids: Vec::new(),
         }
     }
 
@@ -438,6 +508,123 @@ mod tests {
         }
     }
 
+    // ---- the SAE IDs of a key (`sae=`) --------------------------------------
+
+    /// A line written before the option existed lists no SAE: that key gets
+    /// no QKD key until the operator says which SAE is its own.
+    #[test]
+    fn a_line_without_the_option_lists_no_sae() {
+        let keys = load(&format!(
+            "{ALG} {} perm=read alice@example.com\n",
+            line_key(1)
+        ));
+        let alice = loaded(&keys, 1).unwrap();
+        assert!(alice.sae_ids.is_empty());
+        assert!(!alice.may_name_sae("sae-alice"));
+        assert!(!alice.may_name_sae(""));
+    }
+
+    #[test]
+    fn sae_ids_are_read_from_the_line_in_any_position_among_the_options() {
+        let keys = load(&format!(
+            "{ALG} {} perm=read sae=sae-alice alice\n\
+             {ALG} {} sae=sae-bob-1,sae-bob-2 perm=read,write bob\n\
+             {ALG} {} sae=site:a.1_x\n\
+             {ALG} {} sae=twice,twice,once repeated entries count once\n",
+            line_key(1),
+            line_key(2),
+            line_key(3),
+            line_key(4),
+        ));
+        assert_eq!(keys.len(), 4);
+        let alice = loaded(&keys, 1).unwrap();
+        assert_eq!(alice.sae_ids, vec!["sae-alice"]);
+        assert_eq!(alice.comment, "alice");
+        let bob = loaded(&keys, 2).unwrap();
+        assert_eq!(bob.sae_ids, vec!["sae-bob-1", "sae-bob-2"]);
+        assert_eq!(bob.permissions, vec!["read", "write"]);
+        assert_eq!(bob.comment, "bob");
+        assert_eq!(loaded(&keys, 3).unwrap().sae_ids, vec!["site:a.1_x"]);
+        let four = loaded(&keys, 4).unwrap();
+        assert_eq!(four.sae_ids, vec!["twice", "once"]);
+        assert_eq!(four.comment, "repeated entries count once");
+
+        // A key may name its own SAE IDs, exactly as written, and no other.
+        assert!(bob.may_name_sae("sae-bob-1"));
+        assert!(bob.may_name_sae("sae-bob-2"));
+        for other in [
+            "sae-alice",
+            "sae-bob",
+            "sae-bob-11",
+            "SAE-BOB-1",
+            "sae-bob-1 ",
+            "",
+        ] {
+            assert!(!bob.may_name_sae(other), "{other:?} is not bob's");
+        }
+
+        let auth = Authenticator {
+            authorized_keys: keys,
+        };
+        assert_eq!(auth.count_with_sae_ids(), 4);
+        assert!(auth.shared_sae_ids().is_empty());
+    }
+
+    /// A `sae=` the loader cannot read drops the line. A malformed list must
+    /// never authorize the key for some other SAE, or for none in silence.
+    #[test]
+    fn a_line_with_a_malformed_sae_list_authorizes_nobody() {
+        let too_long = format!("sae={}", "a".repeat(257));
+        for option in [
+            "sae=",
+            "sae=,",
+            "sae=a,,b",
+            "sae=a,",
+            "sae=../status",
+            "sae=a/b",
+            "sae=a?b",
+            "sae=a#b",
+            "sae=a%2e",
+            "sae=.",
+            "sae=..",
+            "sae=a sae=b",
+            too_long.as_str(),
+        ] {
+            let keys = load(&format!(
+                "{ALG} {} {option} someone\n{ALG} {} sae=fine the next line still loads\n",
+                line_key(1),
+                line_key(2),
+            ));
+            assert!(loaded(&keys, 1).is_none(), "{option}: the line must drop");
+            assert_eq!(loaded(&keys, 2).unwrap().sae_ids, vec!["fine"], "{option}");
+        }
+    }
+
+    /// Two keys may list the same SAE ID. It is allowed, and reported, since
+    /// each of them can then use up that SAE's keys.
+    #[test]
+    fn an_sae_id_listed_by_two_keys_is_reported() {
+        let auth = Authenticator {
+            authorized_keys: load(&format!(
+                "{ALG} {} sae=shared,only-one one\n\
+                 {ALG} {} sae=shared,only-two two\n\
+                 {ALG} {} sae=shared,also three\n\
+                 {ALG} {} sae=also four\n\
+                 {ALG} {} perm=read no list\n",
+                line_key(1),
+                line_key(2),
+                line_key(3),
+                line_key(4),
+                line_key(5),
+            )),
+        };
+        assert_eq!(
+            auth.shared_sae_ids(),
+            vec![("also".to_string(), 2), ("shared".to_string(), 3)]
+        );
+        assert_eq!(auth.count_with_sae_ids(), 4);
+    }
+
     /// Once the comment has begun, nothing in it is an option.
     #[test]
     fn an_option_written_inside_the_comment_is_a_comment() {
@@ -448,5 +635,13 @@ mod tests {
         let key = loaded(&keys, 1).unwrap();
         assert_eq!(key.wire, HandshakeVersion::V3);
         assert_eq!(key.comment, "moved off wire=2.1 on 2026-11-12");
+
+        let keys = load(&format!(
+            "{ALG} {} perm=read used to have sae=old-sae\n",
+            line_key(1),
+        ));
+        let key = loaded(&keys, 1).unwrap();
+        assert!(key.sae_ids.is_empty());
+        assert_eq!(key.comment, "used to have sae=old-sae");
     }
 }

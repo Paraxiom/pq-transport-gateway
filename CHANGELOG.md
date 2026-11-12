@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+### SAE IDs are bound to client keys (2026-11-12)
+
+- **Breaking for hybrid clients.** A client gets a QKD key only under an SAE
+  ID that its `authorized_keys` line lists with `sae=a,b`. A hello that names
+  any other SAE ID is refused, and a key whose line lists none gets no QKD
+  key. **Before upgrading a gateway that serves a hybrid client**, add
+  `sae=<its SAE ID>` to that client's line. A client that asks for no QKD
+  key (an empty `client_sae_id`) needs no change.
+- **Why.** Any authorized client could name any SAE ID in its hello, and
+  the gateway drew a key under that SAE for it. A client could use up the
+  keys of another, whose sessions then went on without QKD.
+- The refusal comes after the hello's signature has verified and before the
+  key manager is asked for anything. It is a refusal, not a session without
+  QKD: a client that asked for a QKD key is told it got none. It is written
+  to the audit log.
+- A `sae=` list the loader cannot read (an empty entry, a character an SAE
+  ID may not hold, the option given twice) drops the line, so that key is
+  not authorized. Two keys may list the same SAE ID; the gateway names such
+  SAE IDs at startup. `sae=` on a `wire=2.1` key has no effect and is
+  reported.
+- Not covered: key requests inside a session draw from the gateway's own
+  default SAE, for every client alike.
+- Tests: `a_client_cannot_draw_keys_under_another_clients_sae` (it fails
+  with the check switched off: the client gets its session and a key is
+  drawn), `a_key_with_no_sae_list_gets_no_qkd_key`,
+  `an_unsigned_hello_is_refused_before_the_sae_check`; four tests of the
+  option in `auth.rs`; one of the check in `proxy.rs`.
+
 ### Wire 2.1 is off by default (2026-11-12)
 
 - **Breaking for wire 2.1 clients.** A gateway accepts the wire versions

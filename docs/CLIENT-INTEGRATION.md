@@ -235,6 +235,18 @@ falcon512+slh-dsa-shake128f <base64(falcon_vk_897 ‖ slh_dsa_vk_32)> perm=read,
 
 The client must publish the same vk pair in its `ClientHello`.
 
+**A QKD key needs `sae=`.** A client that asks for a hybrid session (wire
+`3.2`, `PROTOCOL-V3-QKD-KEYID.md`) names its SAE ID in its hello. The
+gateway serves it only if the client's line lists that SAE ID:
+
+```
+falcon512+slh-dsa-shake128f <base64(falcon_vk_897 ‖ slh_dsa_vk_32)> perm=read sae=sae-102 client@example.com
+```
+
+Several SAE IDs are separated by commas. A hello that names an SAE ID its
+line does not list is refused, and so is any hello that names one when the
+line lists none. A client that asks for no QKD key needs no list.
+
 **Wire 2.1 is off by default.** A line registers the key for wire `3.2`. The
 handshake this document describes is wire `2.1`, whose hello is not signed
 (`THREAT-MODEL.md`, L6). For a client that speaks it, the operator does two

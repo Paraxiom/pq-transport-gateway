@@ -187,6 +187,14 @@ key_mode = Hybrid  if client_qkd && server_qkd
          = PqcOnly  otherwise
 ```
 
+Since 2026-11-12 one case is a refusal and not `PqcOnly`: a hello that names
+an SAE ID its key may not name. "Server policy allows QKD for
+`client_sae_id`" means that the SAE ID is on the `sae=` list of the client's
+`authorized_keys` line (§10, question 1). A hello with any other non-empty
+`client_sae_id` is refused after its signature has verified and before
+`enc_keys` is called. A client that wants no QKD key leaves `client_sae_id`
+empty and needs no list.
+
 The server sets `ServerHello.key_mode` authoritatively and signs it (§4). The
 client MUST honor the server's `key_mode`:
 
@@ -321,7 +329,9 @@ QKD chain step (§4).
 
 ## 10. Open questions
 
-1. **SAE-ID ↔ identity binding.** Today the client's ETSI SAE-ID (KME cert CN)
+1. **SAE-ID ↔ identity binding.** *Closed on 2026-11-12: `authorized_keys`
+   binds them with `sae=`, and a key with no list gets no QKD key (§5). The
+   question as it stood:* Today the client's ETSI SAE-ID (KME cert CN)
    is independent of its PQTG Falcon vk. Should `authorized_keys` bind them
    (`… sae=102`) so a client can't claim a slave id it isn't entitled to? The
    server's `enc_keys(slave)` is still gated by KMS policy, but binding closes

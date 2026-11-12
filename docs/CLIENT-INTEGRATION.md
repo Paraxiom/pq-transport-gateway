@@ -235,6 +235,15 @@ falcon512+slh-dsa-shake128f <base64(falcon_vk_897 ‖ slh_dsa_vk_32)> perm=read,
 
 The client must publish the same vk pair in its `ClientHello`.
 
+**Limits per client.** A gateway counts, per client key and per minute,
+the handshakes it completes (`proxy.client_handshakes_per_minute`, 30 by
+default) and the key requests it serves, over all of that client's sessions
+(`proxy.client_key_requests_per_minute`, 120 by default). A hello over the
+limit is refused. A key request over the limit gets no answer and ends the
+session, since the protocol has no message that says "later"; reconnecting
+gives no new allowance. A client that needs more asks the operator to raise
+its gateway's limits.
+
 **A QKD key needs `sae=`.** A client that asks for a hybrid session (wire
 `3.2`, `PROTOCOL-V3-QKD-KEYID.md`) names its SAE ID in its hello. The
 gateway serves it only if the client's line lists that SAE ID:

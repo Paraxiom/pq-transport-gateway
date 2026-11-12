@@ -32,6 +32,7 @@ use crate::{
         FALCON_512_VK_LEN, MIN_SESSION_FRAME_BYTES, ML_KEM_768_EK_LEN, SLH_DSA_SHAKE128F_VK_LEN,
     },
     qkd_client::QkdClient,
+    ratelimit::ClientLimiter,
     replay::{ReplayGuard, Verdict},
 };
 use anyhow::{anyhow, Context, Result};
@@ -55,6 +56,62 @@ pub struct ProxyServer {
     /// section is a hash lookup, and it is taken only after the signature has
     /// verified, so unauthenticated traffic never touches it.
     replay_guard: Arc<Mutex<ReplayGuard>>,
+    /// Per-client limits on handshakes and on key requests, shared by all
+    /// connections: a client does not get a new allowance by reconnecting.
+    limits: Arc<ClientLimits>,
+}
+
+/// The two per-client limits of a gateway (`src/ratelimit.rs`).
+struct ClientLimits {
+    /// `proxy.client_handshakes_per_minute`.
+    handshakes: Mutex<ClientLimiter>,
+    /// `proxy.client_key_requests_per_minute`.
+    key_requests: Mutex<ClientLimiter>,
+}
+
+impl ClientLimits {
+    fn new(proxy: &ProxyConfig) -> Self {
+        Self {
+            handshakes: Mutex::new(ClientLimiter::per_minute(
+                proxy.client_handshakes_per_minute,
+            )),
+            key_requests: Mutex::new(ClientLimiter::per_minute(
+                proxy.client_key_requests_per_minute,
+            )),
+        }
+    }
+}
+
+/// Count one event for this client against a limit, now. An error when the
+/// client already had its limit in the minute that ends now; the event is
+/// then not counted. The clock is read while the lock is held, so readings
+/// never go back from one call to the next.
+fn charge(
+    limiter: &Mutex<ClientLimiter>,
+    client_key_id: &str,
+    what: &str,
+    setting: &str,
+) -> Result<()> {
+    let mut limiter = limiter.lock().unwrap_or_else(|p| p.into_inner());
+    if limiter.allow(client_key_id, Instant::now()) {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "client key {client_key_id} is over its limit of {} {what} per minute ({setting})",
+        limiter.limit()
+    ))
+}
+
+/// A finished handshake: the session, and which authorized key it belongs to.
+struct Established {
+    session: PqSession,
+    /// The client's Falcon key, as its hello gave it. Not used after the
+    /// handshake: the session holds its own copy for the inner signatures.
+    #[allow(dead_code)]
+    client_falcon_vk: Vec<u8>,
+    /// The `key_id` of the client's `authorized_keys` line, which the
+    /// per-client limits are counted under.
+    client_key_id: String,
 }
 
 /// Seconds since the Unix epoch, the clock the v3 hello timestamp is compared
@@ -677,6 +734,11 @@ impl ProxyServer {
         let authenticator = Authenticator::new(&config)?;
         log_wire_policy(&config.proxy, &authenticator);
         log_sae_policy(&authenticator);
+        info!(
+            "Per client and per minute: {} handshakes, {} key requests",
+            config.proxy.client_handshakes_per_minute, config.proxy.client_key_requests_per_minute
+        );
+        let limits = Arc::new(ClientLimits::new(&config.proxy));
         // The guard must remember a hello for the whole interval in which its
         // timestamp is acceptable, which is one second more than 2 × skew:
         // `for_skew` gives the window (see replay.rs).
@@ -690,6 +752,7 @@ impl ProxyServer {
             authenticator: Arc::new(authenticator),
             host_key,
             replay_guard,
+            limits,
         })
     }
 
@@ -739,21 +802,52 @@ impl ProxyServer {
         disable_nagle(&stream, &peer_addr);
         audit::log_connection(&peer_addr);
         let timeout = tokio::time::Duration::from_secs(self.config.proxy.connection_timeout);
-        let (session, client_falcon_vk) =
+        let established =
             tokio::time::timeout(timeout, self.perform_handshake(&mut stream, &peer_addr))
                 .await
                 .context("Handshake timeout")?
                 .context("Handshake failed")?;
-        info!("Established PQ session with {}", peer_addr);
-        let _ = client_falcon_vk; // currently unused; reserved for inner auth
-        self.handle_session(stream, session, peer_addr).await
+        info!(
+            "Established PQ session with {} (client key {})",
+            peer_addr, established.client_key_id
+        );
+        self.handle_session(
+            stream,
+            established.session,
+            peer_addr,
+            &established.client_key_id,
+        )
+        .await
+    }
+
+    /// Count one handshake for this client, or refuse it: the client has had
+    /// its `proxy.client_handshakes_per_minute` in the last minute. Called
+    /// once the hello is known to come from the client (wire 3.2) or to name
+    /// it (wire 2.1, whose hello proves nothing more), and before anything is
+    /// signed, encapsulated or asked of the key manager.
+    fn charge_handshake(&self, client_key: &AuthorizedKey, peer_addr: &SocketAddr) -> Result<()> {
+        charge(
+            &self.limits.handshakes,
+            &client_key.key_id,
+            "handshakes",
+            "proxy.client_handshakes_per_minute",
+        )
+        .inspect_err(|e| {
+            audit::log_rate_limited(
+                peer_addr,
+                &client_key.key_id,
+                "handshakes",
+                self.config.proxy.client_handshakes_per_minute as usize,
+            );
+            warn!("Rejected client {}: {}", peer_addr, e);
+        })
     }
 
     async fn perform_handshake(
         &self,
         stream: &mut TcpStream,
         peer_addr: &SocketAddr,
-    ) -> Result<(PqSession, Vec<u8>)> {
+    ) -> Result<Established> {
         // Read the hello frame ONCE as raw bytes. bincode is not
         // self-describing, so peek the leading `version` string to pick the
         // struct shape (PROTOCOL-V3-QKD-KEYID.md §8), then branch on major.
@@ -842,22 +936,33 @@ impl ProxyServer {
         stream: &mut TcpStream,
         peer_addr: &SocketAddr,
         hello_bytes: &[u8],
-    ) -> Result<(PqSession, Vec<u8>)> {
+    ) -> Result<Established> {
         let client_hello: ClientHello = bincode::deserialize(hello_bytes)?;
-        self.validate_and_authorize(
+        let client_key = self.validate_and_authorize(
             HandshakeVersion::V2,
             &client_hello.kem_ek,
             &client_hello.falcon_vk,
             &client_hello.slh_dsa_vk,
             peer_addr,
         )?;
+        // The 2.1 hello is not signed, so this counts every hello that names
+        // the key, whoever sent it: someone else can use up a 2.1 client's
+        // allowance. That is the price of bounding what a 2.1 key can be
+        // made to cost the gateway.
+        self.charge_handshake(client_key, peer_addr)?;
+        let client_key_id = client_key.key_id.clone();
         let handshake = ServerHandshake::new().respond(&client_hello, &self.host_key)?;
         write_framed(stream, handshake.server_hello()).await?;
         debug!(
             "v2 client {}: PQC-only session (hybrid requires wire protocol v3)",
             peer_addr
         );
-        handshake.into_session(None)
+        let (session, client_falcon_vk) = handshake.into_session(None)?;
+        Ok(Established {
+            session,
+            client_falcon_vk,
+            client_key_id,
+        })
     }
 
     /// v3 flow (PROTOCOL-V3-QKD-KEYID.md §5-§6): negotiate the key mode and
@@ -869,7 +974,7 @@ impl ProxyServer {
         stream: &mut TcpStream,
         peer_addr: &SocketAddr,
         hello_bytes: &[u8],
-    ) -> Result<(PqSession, Vec<u8>)> {
+    ) -> Result<Established> {
         let client_hello: ClientHelloV3 = bincode::deserialize(hello_bytes)?;
         if client_hello.client_sae_id.len() > MAX_SAE_ID_BYTES {
             return Err(anyhow!(
@@ -924,6 +1029,13 @@ impl ProxyServer {
             }
         }
 
+        // ── The client's handshake allowance ─────────────────────────────────
+        // Only a hello that passed every check above is counted: it is
+        // signed, fresh and seen for the first time, so nobody else can use
+        // up this client's allowance, with a copy of its hello either.
+        self.charge_handshake(client_key, peer_addr)?;
+        let client_key_id = client_key.key_id.clone();
+
         // ── QKD negotiation (spec §5) — after authorization, before transcript
         let want_qkd = client_hello.qkd_capable && !client_hello.client_sae_id.is_empty();
         let qkd = if want_qkd {
@@ -967,7 +1079,12 @@ impl ProxyServer {
             peer_addr,
             handshake.server_hello().key_mode
         );
-        handshake.into_session()
+        let (session, client_falcon_vk) = handshake.into_session()?;
+        Ok(Established {
+            session,
+            client_falcon_vk,
+            client_key_id,
+        })
     }
 
     async fn handle_session(
@@ -975,6 +1092,7 @@ impl ProxyServer {
         mut stream: TcpStream,
         mut session: PqSession,
         peer_addr: SocketAddr,
+        client_key_id: &str,
     ) -> Result<()> {
         loop {
             let mut len_buf = [0u8; 4];
@@ -1003,6 +1121,27 @@ impl ProxyServer {
             // the connection here, before any key is requested.
             let request_bytes = session.decrypt_and_verify(&encrypted)?;
             let request: KeyRequest = bincode::deserialize(&request_bytes)?;
+
+            // The client's allowance of key requests, over all its sessions.
+            // Counted once the request has opened and its signature has
+            // verified, and before the key manager is asked. A request over
+            // the limit ends the session: the protocol has no way to say
+            // "later".
+            charge(
+                &self.limits.key_requests,
+                client_key_id,
+                "key requests",
+                "proxy.client_key_requests_per_minute",
+            )
+            .inspect_err(|e| {
+                audit::log_rate_limited(
+                    &peer_addr,
+                    client_key_id,
+                    "key requests",
+                    self.config.proxy.client_key_requests_per_minute as usize,
+                );
+                warn!("Ending the session with {}: {}", peer_addr, e);
+            })?;
             audit::log_key_request(&peer_addr, &request.key_id, request.size);
 
             let response = self.process_key_request(request).await?;
@@ -1309,6 +1448,35 @@ mod tests {
             assert!(err.contains("not among the SAE IDs"), "{other:?}: {err}");
             assert!(err.contains("sae-a, sae-b"), "{other:?}: {err}");
         }
+    }
+
+    /// The two limiters take their limits from the configuration, count each
+    /// client apart, and do not share a count with each other.
+    #[test]
+    fn the_client_limits_come_from_the_configuration() {
+        let mut proxy = Config::default().proxy;
+        proxy.client_handshakes_per_minute = 7;
+        proxy.client_key_requests_per_minute = 11;
+        let limits = ClientLimits::new(&proxy);
+        assert_eq!(limits.handshakes.lock().unwrap().limit(), 7);
+        assert_eq!(limits.key_requests.lock().unwrap().limit(), 11);
+
+        let setting = "proxy.client_handshakes_per_minute";
+        for _ in 0..7 {
+            charge(&limits.handshakes, "key-0", "handshakes", setting).unwrap();
+        }
+        let err = charge(&limits.handshakes, "key-0", "handshakes", setting)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "client key key-0 is over its limit of 7 handshakes per minute \
+             (proxy.client_handshakes_per_minute)"
+        );
+        charge(&limits.handshakes, "key-1", "handshakes", setting)
+            .expect("another client has its own count");
+        charge(&limits.key_requests, "key-0", "key requests", "s")
+            .expect("key requests are counted apart from handshakes");
     }
 
     /// The version strings of the setting, of the `wire=` option and of the

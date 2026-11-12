@@ -391,6 +391,21 @@ pub fn log_auth_failure(peer: &SocketAddr, reason: &str) {
     );
 }
 
+/// A client went over one of its per-minute limits (`src/ratelimit.rs`):
+/// `what` is "handshakes" or "key requests". The handshake was refused, or
+/// the session ended.
+pub fn log_rate_limited(peer: &SocketAddr, client_key: &str, what: &str, per_minute: usize) {
+    write_entry(
+        "rate_limited",
+        serde_json::json!({
+            "peer_address": peer.to_string(),
+            "client_key": client_key,
+            "what": what,
+            "limit_per_minute": per_minute,
+        }),
+    );
+}
+
 /// Audit-log helper for unexpected internal errors. Currently called only
 /// from rare paths; `#[allow(dead_code)]` because the bin's hot path goes
 /// through `tracing::error!` instead.

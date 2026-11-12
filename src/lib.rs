@@ -11,6 +11,7 @@ pub mod crypto;
 pub mod kdf;
 pub mod proxy;
 pub mod qkd_client;
+pub mod ratelimit;
 pub mod relay;
 pub mod replay;
 

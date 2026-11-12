@@ -61,6 +61,22 @@ pub struct ProxyConfig {
     /// also carry `wire=2.1`, and a key marked that way is refused on 3.2.
     #[serde(default = "default_versions")]
     pub versions: Vec<String>,
+
+    /// Handshakes one client key may complete in any minute. Each costs the
+    /// gateway a signature by its long-term key and an encapsulation, and a
+    /// hybrid one a QKD key. Default 30. Counted after the allow-list, and
+    /// on wire 3.2 after the hello's signature, so nobody else can use up a
+    /// 3.2 client's allowance. There is no value for "no limit": use a
+    /// number above what the client can need.
+    #[serde(default = "default_client_handshakes_per_minute")]
+    pub client_handshakes_per_minute: u32,
+
+    /// Key requests one client key may make in any minute, over all its
+    /// sessions. Each draws a QKD key from the key manager, under the SAE
+    /// every client shares, and costs a signature by the gateway's long-term
+    /// key. Default 120. A request over the limit ends its session.
+    #[serde(default = "default_client_key_requests_per_minute")]
+    pub client_key_requests_per_minute: u32,
 }
 
 /// The wire versions a gateway can be told to accept (`proxy.versions`).
@@ -94,6 +110,29 @@ impl ProxyConfig {
             }
             if self.versions[..i].contains(v) {
                 anyhow::bail!("proxy.versions lists {v:?} twice");
+            }
+        }
+        Ok(())
+    }
+
+    /// The two per-client limits must allow something. Zero would refuse
+    /// every client, and it is not a way to say "no limit".
+    fn validate_client_limits(&self) -> Result<()> {
+        for (name, value) in [
+            (
+                "proxy.client_handshakes_per_minute",
+                self.client_handshakes_per_minute,
+            ),
+            (
+                "proxy.client_key_requests_per_minute",
+                self.client_key_requests_per_minute,
+            ),
+        ] {
+            if value == 0 {
+                anyhow::bail!(
+                    "{name} is 0, which refuses every client. There is no value for \"no \
+                     limit\": use a number above what a client can need"
+                );
             }
         }
         Ok(())
@@ -390,6 +429,7 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         self.relay.validate()?;
         self.proxy.validate_versions()?;
+        self.proxy.validate_client_limits()?;
 
         // The vendor API must be on this machine: its TLS is the classical
         // link the gateway exists to keep off the network.
@@ -523,6 +563,8 @@ impl Default for Config {
                 hello_max_skew_secs: default_hello_max_skew_secs(),
                 hello_replay_cache_entries: default_hello_replay_cache_entries(),
                 versions: default_versions(),
+                client_handshakes_per_minute: default_client_handshakes_per_minute(),
+                client_key_requests_per_minute: default_client_key_requests_per_minute(),
             },
             qkd: QkdConfig {
                 vendor_api: "https://localhost:8080".to_string(),
@@ -576,6 +618,12 @@ fn default_hello_max_skew_secs() -> u64 {
 }
 fn default_versions() -> Vec<String> {
     vec![WIRE_3_2.to_string()]
+}
+fn default_client_handshakes_per_minute() -> u32 {
+    30
+}
+fn default_client_key_requests_per_minute() -> u32 {
+    120
 }
 fn default_hello_replay_cache_entries() -> usize {
     131_072
@@ -816,6 +864,49 @@ audit_log = "/var/log/pq-qkd-proxy/audit.log"
         for near in ["2", "2.10", "3", "3.20", " 2.1", "2.1 ", "v2.1", ""] {
             assert!(!cfg.proxy.accepts_wire(near), "{near:?} must not match");
         }
+    }
+
+    /// Both per-client limits are on without any setting, in the built-in
+    /// default and in a file that says nothing about them.
+    #[test]
+    fn the_client_limits_are_on_by_default() {
+        for cfg in [Config::default(), config_with_proxy_lines("").unwrap()] {
+            assert_eq!(cfg.proxy.client_handshakes_per_minute, 30);
+            assert_eq!(cfg.proxy.client_key_requests_per_minute, 120);
+            cfg.proxy.validate_client_limits().unwrap();
+        }
+        let cfg = config_with_proxy_lines(
+            "client_handshakes_per_minute = 5\nclient_key_requests_per_minute = 7",
+        )
+        .unwrap();
+        assert_eq!(cfg.proxy.client_handshakes_per_minute, 5);
+        assert_eq!(cfg.proxy.client_key_requests_per_minute, 7);
+        cfg.proxy.validate_client_limits().unwrap();
+    }
+
+    /// Zero is refused at startup: it would refuse every client, and it must
+    /// not be read as "no limit".
+    #[test]
+    fn a_client_limit_of_zero_is_refused_at_startup() {
+        for lines in [
+            "client_handshakes_per_minute = 0",
+            "client_key_requests_per_minute = 0",
+        ] {
+            let cfg = config_with_proxy_lines(lines).expect("the file itself parses");
+            let err = cfg.proxy.validate_client_limits().unwrap_err().to_string();
+            assert!(err.contains("is 0"), "{lines}: {err}");
+            assert!(
+                err.contains(lines.split(' ').next().unwrap()),
+                "{lines}: {err}"
+            );
+            assert!(
+                cfg.validate().is_err(),
+                "{lines}: validate must refuse it too"
+            );
+        }
+        // A negative number or a fraction is a parse error.
+        assert!(config_with_proxy_lines("client_handshakes_per_minute = -1").is_err());
+        assert!(config_with_proxy_lines("client_key_requests_per_minute = 1.5").is_err());
     }
 
     /// A list the gateway cannot serve is refused at startup, with the

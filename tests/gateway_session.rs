@@ -83,6 +83,59 @@ impl Gateway {
     }
 }
 
+/// A gateway that serves several connections, one after the other, with one
+/// `ProxyServer`: what a client meets when it reconnects.
+struct Serving {
+    addr: SocketAddr,
+    pin: [u8; 32],
+    /// What `handle_connection` returned for each connection, in order.
+    outcomes: JoinHandle<Vec<Result<()>>>,
+    /// The key manager's route for the gateway's default SAE, which key
+    /// requests inside a session draw from.
+    default_sae_route: usize,
+    kme: MockServer,
+    _dir: TempDir,
+}
+
+impl Serving {
+    /// How many keys the gateway has asked the key manager for under its
+    /// default SAE: one per key request it served.
+    async fn keys_drawn_by_requests(&self) -> usize {
+        httpmock::Mock::new(self.default_sae_route, &self.kme)
+            .hits_async()
+            .await
+    }
+}
+
+/// What a test asks of its gateway beyond the defaults.
+#[derive(Default)]
+struct Policy<'a> {
+    /// `proxy.versions`. Empty: the default, wire 3.2 only.
+    versions: &'a [&'a str],
+    /// The options of the client's `authorized_keys` line (`"wire=2.1"`,
+    /// `"sae=..."`), or nothing for an ordinary 3.2 key with no SAE.
+    key_options: &'a str,
+    /// A second authorized client, on a plain line of its own: its Falcon
+    /// and SLH-DSA public keys.
+    second_client: Option<(&'a [u8], &'a [u8])>,
+    /// `proxy.client_handshakes_per_minute`, when not the default.
+    handshakes_per_minute: Option<u32>,
+    /// `proxy.client_key_requests_per_minute`, when not the default.
+    key_requests_per_minute: Option<u32>,
+}
+
+/// A gateway ready to accept, and what the tests need to know about it.
+struct Built {
+    proxy: ProxyServer,
+    listener: TcpListener,
+    addr: SocketAddr,
+    pin: [u8; 32],
+    client_sae_route: usize,
+    default_sae_route: usize,
+    kme: MockServer,
+    dir: TempDir,
+}
+
 /// A gateway with the default setting (wire 3.2 only) and `client` as an
 /// ordinary authorized key.
 async fn start_gateway(client: &PqKeyExchange) -> Gateway {
@@ -113,6 +166,79 @@ async fn start_gateway_with_keys(
     versions: &[&str],
     key_options: &str,
 ) -> Gateway {
+    let built = build_gateway(
+        falcon_vk,
+        slh_dsa_vk,
+        Policy {
+            versions,
+            key_options,
+            ..Policy::default()
+        },
+    )
+    .await;
+    let Built {
+        proxy,
+        listener,
+        addr,
+        pin,
+        client_sae_route,
+        kme,
+        dir,
+        ..
+    } = built;
+    let outcome = tokio::spawn(async move {
+        let (stream, peer) = listener.accept().await?;
+        proxy.handle_connection(stream, peer).await
+    });
+    Gateway {
+        addr,
+        pin,
+        outcome,
+        client_sae_route,
+        kme,
+        _dir: dir,
+    }
+}
+
+/// A gateway under `policy` that serves `connections` connections, one after
+/// the other, for the client with these two public keys.
+async fn start_serving(
+    falcon_vk: &[u8],
+    slh_dsa_vk: &[u8],
+    policy: Policy<'_>,
+    connections: usize,
+) -> Serving {
+    let Built {
+        proxy,
+        listener,
+        addr,
+        pin,
+        default_sae_route,
+        kme,
+        dir,
+        ..
+    } = build_gateway(falcon_vk, slh_dsa_vk, policy).await;
+    let outcomes = tokio::spawn(async move {
+        let mut outcomes = Vec::with_capacity(connections);
+        for _ in 0..connections {
+            let (stream, peer) = listener.accept().await.expect("accept");
+            outcomes.push(proxy.handle_connection(stream, peer).await);
+        }
+        outcomes
+    });
+    Serving {
+        addr,
+        pin,
+        outcomes,
+        default_sae_route,
+        kme,
+        _dir: dir,
+    }
+}
+
+/// The key manager emulator, the identity, the `authorized_keys` file and
+/// the `ProxyServer` of a test gateway.
+async fn build_gateway(falcon_vk: &[u8], slh_dsa_vk: &[u8], policy: Policy<'_>) -> Built {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let dir = TempDir(std::env::temp_dir().join(format!(
         "pqtg-gateway-session-{}-{}",
@@ -122,14 +248,16 @@ async fn start_gateway_with_keys(
     std::fs::create_dir_all(&dir.0).unwrap();
 
     let kme = MockServer::start_async().await;
-    kme.mock_async(|when, then| {
-        when.method(POST)
-            .path("/api/v1/keys/default-slave/enc_keys");
-        then.status(200).json_body(json!({
-            "keys": [{ "key_ID": KEY_ID, "key": B64.encode(DELIVERED) }]
-        }));
-    })
-    .await;
+    let default_sae_route = kme
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/api/v1/keys/default-slave/enc_keys");
+            then.status(200).json_body(json!({
+                "keys": [{ "key_ID": KEY_ID, "key": B64.encode(DELIVERED) }]
+            }));
+        })
+        .await
+        .id;
     let client_sae_route = kme
         .mock_async(|when, then| {
             when.method(POST)
@@ -148,15 +276,21 @@ async fn start_gateway_with_keys(
 
     let mut vks = falcon_vk.to_vec();
     vks.extend_from_slice(slh_dsa_vk);
-    let authorized = dir.0.join("authorized_keys");
-    std::fs::write(
-        &authorized,
-        format!(
-            "falcon512+slh-dsa-shake128f {} perm=read,write {key_options} e2e@client\n",
+    let mut lines = format!(
+        "falcon512+slh-dsa-shake128f {} perm=read,write {} e2e@client\n",
+        B64.encode(&vks),
+        policy.key_options
+    );
+    if let Some((falcon_vk, slh_dsa_vk)) = policy.second_client {
+        let mut vks = falcon_vk.to_vec();
+        vks.extend_from_slice(slh_dsa_vk);
+        lines.push_str(&format!(
+            "falcon512+slh-dsa-shake128f {} perm=read second@client\n",
             B64.encode(&vks)
-        ),
-    )
-    .unwrap();
+        ));
+    }
+    let authorized = dir.0.join("authorized_keys");
+    std::fs::write(&authorized, lines).unwrap();
 
     let mut config = ProxyConfig::default();
     assert_eq!(
@@ -164,7 +298,15 @@ async fn start_gateway_with_keys(
         vec!["3.2".to_string()],
         "the default must be wire 3.2 only"
     );
-    config.proxy.versions = versions.iter().map(|v| v.to_string()).collect();
+    if !policy.versions.is_empty() {
+        config.proxy.versions = policy.versions.iter().map(|v| v.to_string()).collect();
+    }
+    if let Some(n) = policy.handshakes_per_minute {
+        config.proxy.client_handshakes_per_minute = n;
+    }
+    if let Some(n) = policy.key_requests_per_minute {
+        config.proxy.client_key_requests_per_minute = n;
+    }
     config.qkd.vendor_api = kme.url("");
     config.qkd.key_timeout = 5;
     config.security.authorized_keys = authorized.to_string_lossy().into_owned();
@@ -173,17 +315,15 @@ async fn start_gateway_with_keys(
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let outcome = tokio::spawn(async move {
-        let (stream, peer) = listener.accept().await?;
-        proxy.handle_connection(stream, peer).await
-    });
-    Gateway {
+    Built {
+        proxy,
+        listener,
         addr,
         pin,
-        outcome,
         client_sae_route,
+        default_sae_route,
         kme,
-        _dir: dir,
+        dir,
     }
 }
 
@@ -845,4 +985,307 @@ async fn an_unsigned_hello_is_refused_before_the_sae_check() {
     assert!(reason.contains("signature"), "got: {reason}");
     assert!(!reason.contains("SAE"), "got: {reason}");
     assert_eq!(drawn, 0);
+}
+
+// ---- per-client limits: handshakes and key requests per minute -------------
+
+/// The gateway's reason for ending connection `index`, with its causes.
+fn reason(outcomes: &[Result<()>], index: usize) -> String {
+    match &outcomes[index] {
+        Ok(()) => panic!("connection {index} ended cleanly; an error was expected"),
+        Err(e) => format!("{e:#}"),
+    }
+}
+
+/// A client's key requests are counted over all its sessions. With a limit
+/// of three a minute: two in one session, one in the next, and the fourth
+/// gets no answer, ends the session, and draws no key.
+#[tokio::test]
+async fn a_client_gets_its_key_requests_per_minute_over_all_its_sessions() {
+    let me = PqKeyExchange::new().unwrap();
+    let gw = start_serving(
+        me.falcon_pk_bytes(),
+        me.slh_dsa_pk_bytes(),
+        Policy {
+            key_requests_per_minute: Some(3),
+            ..Policy::default()
+        },
+        2,
+    )
+    .await;
+
+    let mut s = TcpStream::connect(gw.addr).await.unwrap();
+    let mut session = client_v3(&mut s, &me, &gw.pin, "3.2", false).await.unwrap();
+    round_trip(&mut s, &mut session, &me).await;
+    round_trip(&mut s, &mut session, &me).await;
+    drop(s);
+
+    // The same client again, in the same minute: reconnecting gives it no
+    // new allowance.
+    let mut s = TcpStream::connect(gw.addr).await.unwrap();
+    let mut session = client_v3(&mut s, &me, &gw.pin, "3.2", false).await.unwrap();
+    round_trip(&mut s, &mut session, &me).await;
+    let fourth = seal_request(&mut session, &me);
+    write_frame(&mut s, &fourth).await.unwrap();
+    assert!(
+        read_frame(&mut s).await.is_none(),
+        "the fourth request of the minute must get no answer"
+    );
+
+    assert_eq!(
+        gw.keys_drawn_by_requests().await,
+        3,
+        "no key may be drawn for the refused request"
+    );
+    let outcomes = gw.outcomes.await.unwrap();
+    assert!(outcomes[0].is_ok(), "the first session ends cleanly");
+    let why = reason(&outcomes, 1);
+    assert!(
+        why.contains("over its limit of 3 key requests per minute"),
+        "got: {why}"
+    );
+    assert!(
+        why.contains("proxy.client_key_requests_per_minute"),
+        "got: {why}"
+    );
+}
+
+/// A client's handshakes are counted too. With a limit of two a minute the
+/// third hello is refused: no ServerHello, so no signature and no
+/// encapsulation for it.
+#[tokio::test]
+async fn a_client_gets_its_handshakes_per_minute_and_no_more() {
+    let me = PqKeyExchange::new().unwrap();
+    let gw = start_serving(
+        me.falcon_pk_bytes(),
+        me.slh_dsa_pk_bytes(),
+        Policy {
+            handshakes_per_minute: Some(2),
+            ..Policy::default()
+        },
+        3,
+    )
+    .await;
+
+    for _ in 0..2 {
+        let mut s = TcpStream::connect(gw.addr).await.unwrap();
+        let mut session = client_v3(&mut s, &me, &gw.pin, "3.2", false).await.unwrap();
+        round_trip(&mut s, &mut session, &me).await;
+    }
+    let mut s = TcpStream::connect(gw.addr).await.unwrap();
+    let err = client_v3(&mut s, &me, &gw.pin, "3.2", false)
+        .await
+        .expect_err("the third handshake of the minute must be refused");
+    assert!(err.to_string().contains("closed"), "got: {err}");
+
+    let outcomes = gw.outcomes.await.unwrap();
+    assert!(outcomes[0].is_ok() && outcomes[1].is_ok());
+    let why = reason(&outcomes, 2);
+    assert!(
+        why.contains("over its limit of 2 handshakes per minute"),
+        "got: {why}"
+    );
+    assert!(
+        why.contains("proxy.client_handshakes_per_minute"),
+        "got: {why}"
+    );
+}
+
+/// Only a hello that passed every check is counted. With a limit of one
+/// handshake a minute, three refused hellos in the client's name (a bad
+/// signature, wire 2.1, an SAE that is not its own) leave its one handshake
+/// untouched. So nobody can lock a 3.2 client out by sending hellos that
+/// name it.
+#[tokio::test]
+async fn refused_hellos_do_not_use_up_a_clients_handshakes() {
+    let me = PqKeyExchange::new().unwrap();
+    let gw = start_serving(
+        me.falcon_pk_bytes(),
+        me.slh_dsa_pk_bytes(),
+        Policy {
+            handshakes_per_minute: Some(1),
+            ..Policy::default()
+        },
+        4,
+    )
+    .await;
+
+    // 1. The client's public keys under a stranger's signature.
+    let stranger = PqKeyExchange::new().unwrap();
+    let kem = EphemeralKemKey::new().unwrap();
+    let mut hello = ClientHelloV3 {
+        version: "3.2".to_string(),
+        client_random: random_bytes::<32>(),
+        kem_ek: kem.ek_bytes.clone(),
+        falcon_vk: stranger.falcon_pk_bytes().to_vec(),
+        slh_dsa_vk: stranger.slh_dsa_pk_bytes().to_vec(),
+        requested_key_size: 32,
+        client_sae_id: String::new(),
+        qkd_capable: false,
+        timestamp: unix_now(),
+        hello_sig: Vec::new(),
+    };
+    hello.sign(&stranger).unwrap();
+    hello.falcon_vk = me.falcon_pk_bytes().to_vec();
+    hello.slh_dsa_vk = me.slh_dsa_pk_bytes().to_vec();
+    let mut s = TcpStream::connect(gw.addr).await.unwrap();
+    write_frame(&mut s, &bincode::serialize(&hello).unwrap())
+        .await
+        .unwrap();
+    assert!(read_frame(&mut s).await.is_none());
+
+    // 2. A wire 2.1 hello that names the client.
+    let mut s = TcpStream::connect(gw.addr).await.unwrap();
+    client_v2(&mut s, &me, &gw.pin, "2.1")
+        .await
+        .expect_err("2.1 is off");
+
+    // 3. The client's own hello, naming an SAE that is not on its line.
+    let mut s = TcpStream::connect(gw.addr).await.unwrap();
+    client_v3(&mut s, &me, &gw.pin, "3.2", true)
+        .await
+        .expect_err("not its SAE");
+
+    // 4. Its one handshake of the minute is still there.
+    let mut s = TcpStream::connect(gw.addr).await.unwrap();
+    let mut session = client_v3(&mut s, &me, &gw.pin, "3.2", false)
+        .await
+        .expect("the client's allowance must be untouched");
+    round_trip(&mut s, &mut session, &me).await;
+    drop(s);
+
+    let outcomes = gw.outcomes.await.unwrap();
+    assert!(reason(&outcomes, 0).contains("signature"));
+    assert!(reason(&outcomes, 1).contains("wire 2.1 is switched off"));
+    assert!(reason(&outcomes, 2).contains("lists no SAE"));
+    assert!(outcomes[3].is_ok(), "the real handshake was served");
+    for (i, outcome) in outcomes.iter().enumerate().take(3) {
+        let why = format!("{:#}", outcome.as_ref().unwrap_err());
+        assert!(!why.contains("over its limit"), "connection {i}: {why}");
+    }
+}
+
+/// Limits are per client key. One client at its limit does not stop another
+/// client of the same gateway.
+#[tokio::test]
+async fn one_client_at_its_limit_does_not_stop_another() {
+    let first = PqKeyExchange::new().unwrap();
+    let second = PqKeyExchange::new().unwrap();
+    let gw = start_serving(
+        first.falcon_pk_bytes(),
+        first.slh_dsa_pk_bytes(),
+        Policy {
+            second_client: Some((second.falcon_pk_bytes(), second.slh_dsa_pk_bytes())),
+            key_requests_per_minute: Some(1),
+            ..Policy::default()
+        },
+        3,
+    )
+    .await;
+
+    // The first client uses its one request and is refused the next.
+    let mut s = TcpStream::connect(gw.addr).await.unwrap();
+    let mut session = client_v3(&mut s, &first, &gw.pin, "3.2", false)
+        .await
+        .unwrap();
+    round_trip(&mut s, &mut session, &first).await;
+    let over = seal_request(&mut session, &first);
+    write_frame(&mut s, &over).await.unwrap();
+    assert!(read_frame(&mut s).await.is_none());
+
+    // The second client is served its own.
+    let mut s = TcpStream::connect(gw.addr).await.unwrap();
+    let mut session = client_v3(&mut s, &second, &gw.pin, "3.2", false)
+        .await
+        .unwrap();
+    round_trip(&mut s, &mut session, &second).await;
+    let over = seal_request(&mut session, &second);
+    write_frame(&mut s, &over).await.unwrap();
+    assert!(read_frame(&mut s).await.is_none());
+
+    // And the first is still at its limit.
+    let mut s = TcpStream::connect(gw.addr).await.unwrap();
+    let mut session = client_v3(&mut s, &first, &gw.pin, "3.2", false)
+        .await
+        .unwrap();
+    let again = seal_request(&mut session, &first);
+    write_frame(&mut s, &again).await.unwrap();
+    assert!(read_frame(&mut s).await.is_none());
+
+    assert_eq!(gw.keys_drawn_by_requests().await, 2, "one key each");
+    let outcomes = gw.outcomes.await.unwrap();
+    for i in 0..3 {
+        let why = reason(&outcomes, i);
+        assert!(
+            why.contains("over its limit of 1 key requests per minute"),
+            "connection {i}: {why}"
+        );
+    }
+    // Two different keys were counted.
+    let ids: Vec<String> = (0..3)
+        .map(|i| {
+            let why = reason(&outcomes, i);
+            let rest = &why[why.find("client key ").unwrap() + "client key ".len()..];
+            rest.split(' ').next().unwrap().to_string()
+        })
+        .collect();
+    assert_ne!(ids[0], ids[1], "the two clients must be counted apart");
+    assert_eq!(
+        ids[0], ids[2],
+        "the first client is the same key both times"
+    );
+}
+
+/// The residual of wire 2.1, bounded. On a gateway that lists 2.1 for a key
+/// marked `wire=2.1`, someone else's replays of one signed request are served
+/// until that key's limit, here two a minute, and then refused: no answer
+/// and no key drawn. (The real client is refused with them for that minute:
+/// on 2.1 the gateway cannot tell the two apart.)
+#[tokio::test]
+async fn on_wire_2_1_the_limit_bounds_what_a_replayed_request_yields() {
+    let client = PqKeyExchange::new().unwrap();
+    let signed = a_request_the_client_once_signed(&client);
+    let (falcon_vk, slh_dsa_vk) = (
+        client.falcon_pk_bytes().to_vec(),
+        client.slh_dsa_pk_bytes().to_vec(),
+    );
+    drop(client);
+
+    let gw = start_serving(
+        &falcon_vk,
+        &slh_dsa_vk,
+        Policy {
+            versions: &["3.2", "2.1"],
+            key_options: "wire=2.1",
+            key_requests_per_minute: Some(2),
+            ..Policy::default()
+        },
+        3,
+    )
+    .await;
+
+    for served in [true, true, false] {
+        let mut s = TcpStream::connect(gw.addr).await.unwrap();
+        let mut session = client_v2_named(&mut s, &falcon_vk, &slh_dsa_vk, &gw.pin, "2.1")
+            .await
+            .expect("a 2.1 session in the client's name");
+        write_frame(&mut s, &seal_signed(&mut session, &signed))
+            .await
+            .unwrap();
+        match read_frame(&mut s).await {
+            Some(response) => {
+                assert!(served, "the third replay of the minute must not be served");
+                open_response(&mut session, &response);
+            }
+            None => assert!(!served, "a replay under the limit is still served"),
+        }
+    }
+
+    assert_eq!(gw.keys_drawn_by_requests().await, 2, "two keys, not three");
+    let outcomes = gw.outcomes.await.unwrap();
+    let why = reason(&outcomes, 2);
+    assert!(
+        why.contains("over its limit of 2 key requests per minute"),
+        "got: {why}"
+    );
 }

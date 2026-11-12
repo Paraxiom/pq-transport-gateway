@@ -78,6 +78,10 @@ fn setup() -> &'static Setup {
 
         let mut config = ProxyConfig::default();
         config.proxy.versions = vec!["3.2".to_string(), "2.1".to_string()];
+        // The same two keys send every hello of the run: without this the
+        // per-client limit would refuse all but the first few each minute.
+        config.proxy.client_handshakes_per_minute = u32::MAX;
+        config.proxy.client_key_requests_per_minute = u32::MAX;
         // Never contacted: the v3 hellos below do not ask for QKD.
         config.qkd.vendor_api = "http://127.0.0.1:9".to_string();
         config.security.authorized_keys = authorized.to_string_lossy().into_owned();

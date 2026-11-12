@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+### Per-client limits on handshakes and key requests (2026-11-12)
+
+- Two settings under `[proxy]`, both per client key and per minute:
+  `client_handshakes_per_minute` (default 30) and
+  `client_key_requests_per_minute` (default 120, over all of the client's
+  sessions). A hello over the limit is refused before anything is signed,
+  encapsulated or asked of the key manager. A key request over the limit
+  gets no answer, draws no key and ends its session. Both are written to
+  the audit log as `rate_limited`.
+- **Check before upgrading:** a client that makes more than 120 key
+  requests a minute, or reconnects more than 30 times a minute, needs the
+  setting raised first. Zero is refused at startup; there is no value for
+  "no limit".
+- **Why.** An authorized client could make the gateway's long-term Falcon
+  key sign without bound, one signature per handshake and one per response,
+  and draw keys from the key manager without bound, under the default SAE
+  that all clients share.
+- The rule is exact: no window of one minute holds more allowed events of
+  one client than its limit (`src/ratelimit.rs`). Refused events are not
+  counted, and reconnecting gives no new allowance.
+- On wire 3.2 only a hello that is signed, fresh and seen for the first
+  time is counted, so nobody else can use up a client's allowance. On wire
+  2.1 the hello proves nothing: anyone who names a 2.1 key uses up its
+  allowance. In return, what a replayed request yields on 2.1 is bounded by
+  that key's limit.
+- Not bounded: the total over all clients. The defaults are a starting
+  point, not measured against a deployment.
+- Tests: `ratelimit.rs` (six cases and two properties against a reference
+  on random runs; an off-by-one planted either way fails them);
+  `tests/gateway_session.rs`
+  (`a_client_gets_its_key_requests_per_minute_over_all_its_sessions`,
+  `a_client_gets_its_handshakes_per_minute_and_no_more`,
+  `refused_hellos_do_not_use_up_a_clients_handshakes`,
+  `one_client_at_its_limit_does_not_stop_another`,
+  `on_wire_2_1_the_limit_bounds_what_a_replayed_request_yields`);
+  `config.rs` (two). The fuzz target `server_hello_path` raises both
+  limits, since two keys send every hello of a run.
+
 ### SAE IDs are bound to client keys (2026-11-12)
 
 - **Breaking for hybrid clients.** A client gets a QKD key only under an SAE
@@ -22,8 +60,8 @@
   not authorized. Two keys may list the same SAE ID; the gateway names such
   SAE IDs at startup. `sae=` on a `wire=2.1` key has no effect and is
   reported.
-- Not covered: key requests inside a session draw from the gateway's own
-  default SAE, for every client alike.
+- Key requests inside a session draw from the gateway's own default SAE,
+  for every client alike; they are limited per client (entry above).
 - Tests: `a_client_cannot_draw_keys_under_another_clients_sae` (it fails
   with the check switched off: the client gets its session and a key is
   drawn), `a_key_with_no_sae_list_gets_no_qkd_key`,
@@ -55,7 +93,8 @@
   admitted a client on both versions, so a request signed in a 3.2 session
   could be replayed in a 2.1 session too.
 - **What stays open.** A key marked `wire=2.1` on a gateway that lists
-  `"2.1"`. Requests from such keys are not rate limited yet.
+  `"2.1"`. What a replay yields there is bounded by that key's limit of key
+  requests (entry above).
 - `authorized_keys`: the options `perm=` and `wire=` may come in either
   order, each once. A line with a repeated option or a `wire=` value that
   is not `2.1` or `3.2` is dropped with a warning, so that key is not

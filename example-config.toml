@@ -24,6 +24,15 @@ allowed_sources = [
 # is then refused on 3.2. Remove "2.1" once the last such client has moved.
 # versions = ["3.2", "2.1"]
 
+# Per client key and per minute. A handshake costs the gateway a signature by
+# its long-term key and an encapsulation, and a hybrid one a QKD key. A key
+# request draws a QKD key from the key manager and costs one more signature.
+# A hello over the limit is refused; a key request over the limit ends its
+# session. Set them a little above what your busiest client needs. Zero is
+# refused: there is no value for "no limit".
+# client_handshakes_per_minute = 30
+# client_key_requests_per_minute = 120
+
 [qkd]
 # Vendor QKD API endpoint - MUST be localhost for security
 vendor_api = "https://localhost:443"

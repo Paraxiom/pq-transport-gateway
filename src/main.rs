@@ -15,6 +15,7 @@ mod crypto;
 mod kdf;
 mod proxy;
 mod qkd_client;
+mod ratelimit;
 mod relay;
 mod replay;
 

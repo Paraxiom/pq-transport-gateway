@@ -15,6 +15,14 @@
 //! 2. inside the window, this guard remembers every `client_random` it has
 //!    admitted and refuses a second sight.
 //!
+//! How long the guard must remember is not `2 * max_skew`. The two clocks
+//! are compared in whole seconds, so a hello stamped `t` passes the first
+//! check while the server clock reads `t - max_skew ..= t + max_skew`: that
+//! is `2 * max_skew + 1` seconds of real time. With a window of
+//! `2 * max_skew`, a hello first seen at the start of that interval was
+//! forgotten during its last second and could be admitted again (found on
+//! 2026-11-11). [`ReplayGuard::window_for_skew`] gives the right window.
+//!
 //! Memory is therefore bounded by handshake rate × window, and capped. Only
 //! signature-valid, in-window hellos are ever inserted, so an attacker without
 //! an authorized client's private key cannot fill the cache; hitting the cap
@@ -44,10 +52,42 @@ pub struct ReplayGuard {
     order: VecDeque<([u8; 32], Instant)>,
 }
 
+/// One second on top of twice the skew, because the timestamp check works in
+/// whole seconds: the interval in which a timestamp is acceptable is
+/// `2 * skew + 1` seconds long.
+const WHOLE_SECOND_SECS: u64 = 1;
+
+/// One more second for the time between reading the clocks and reaching the
+/// guard (the signature check, the wait for the lock). The guard measures
+/// age from clock readings taken before that delay, so the delay has to be
+/// covered by the window. One second is far more than either takes; the
+/// model states the bound as an assumption.
+const PROCESSING_SLACK_SECS: u64 = 1;
+
 impl ReplayGuard {
-    /// `window` should be twice the accepted clock skew: a hello stamped `t` is
-    /// acceptable while the server clock is within `[t - skew, t + skew]`, so
-    /// the guard has to remember it for up to `2 * skew` after first sight.
+    /// The window for a timestamp check that accepts `±max_skew_secs`:
+    /// `2 * max_skew_secs + 2` seconds. See the module documentation for why
+    /// it is not `2 * max_skew_secs`. Saturates instead of wrapping on an
+    /// absurd skew, which then keeps every entry: the guard fills and fails
+    /// closed. A `const fn`, so that the relay can make it a constant.
+    pub const fn window_for_skew(max_skew_secs: u64) -> Duration {
+        Duration::from_secs(
+            max_skew_secs
+                .saturating_mul(2)
+                .saturating_add(WHOLE_SECOND_SECS + PROCESSING_SLACK_SECS),
+        )
+    }
+
+    /// A guard for a timestamp check that accepts `±max_skew_secs`. Use this
+    /// one: it cannot be given a window that is too short.
+    pub fn for_skew(max_skew_secs: u64, max_entries: usize) -> Self {
+        Self::new(Self::window_for_skew(max_skew_secs), max_entries)
+    }
+
+    /// A guard with an explicit window. `window` must cover the whole
+    /// interval in which a hello's timestamp is acceptable, plus the
+    /// processing delay: use [`ReplayGuard::window_for_skew`], or
+    /// [`ReplayGuard::for_skew`] directly.
     pub fn new(window: Duration, max_entries: usize) -> Self {
         Self {
             window,
@@ -126,6 +166,46 @@ mod tests {
         assert_eq!(g.check_and_insert(id(1), t0), Verdict::Fresh);
         assert_eq!(
             g.check_and_insert(id(1), t0 + Duration::from_secs(240)),
+            Verdict::Fresh
+        );
+    }
+
+    #[test]
+    fn the_window_for_a_skew_covers_the_whole_acceptance_interval() {
+        // 2 * skew + 1 seconds in which the timestamp is acceptable, plus
+        // one second of processing slack.
+        assert_eq!(ReplayGuard::window_for_skew(120), Duration::from_secs(242));
+        assert_eq!(ReplayGuard::window_for_skew(0), Duration::from_secs(2));
+        // An absurd skew saturates; it does not wrap round to a short window.
+        assert_eq!(
+            ReplayGuard::window_for_skew(u64::MAX),
+            Duration::from_secs(u64::MAX)
+        );
+        assert_eq!(
+            ReplayGuard::window_for_skew(u64::MAX / 2 + 1),
+            Duration::from_secs(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn a_guard_for_a_skew_remembers_through_the_last_acceptable_second() {
+        let skew = 120;
+        let mut g = ReplayGuard::for_skew(skew, 8);
+        let t0 = Instant::now();
+        assert_eq!(g.check_and_insert(id(1), t0), Verdict::Fresh);
+        // The timestamp can still be acceptable anywhere in the next
+        // 2 * skew + 1 seconds.
+        for ms in [240_000, 240_999, 241_000, 241_999] {
+            assert_eq!(
+                g.check_and_insert(id(1), t0 + Duration::from_millis(ms)),
+                Verdict::Replay,
+                "forgotten {ms} ms after first sight"
+            );
+        }
+        // Past the window it is forgotten; by then the timestamp check
+        // refuses the hello.
+        assert_eq!(
+            g.check_and_insert(id(1), t0 + Duration::from_secs(242)),
             Verdict::Fresh
         );
     }

@@ -262,7 +262,8 @@ QKD chain step (§4).
   `proxy.hello_max_skew_secs` (default 120 s) of the server clock, so a
   recording is worthless after the window; (2) inside the window a bounded
   replay guard (`src/replay.rs`, `proxy.hello_replay_cache_entries`, default
-  131072, window = 2 × skew) refuses a `client_random` it has already
+  131072, window = 2 × skew + 2 s; until 2026-11-12 it was 2 × skew, one
+  second short, see the changelog) refuses a `client_random` it has already
   admitted. Only signature-valid, in-window hellos are inserted, so the cache
   cannot be filled without an authorized private key; when full it fails
   closed. Residual: a clock skew larger than the window between an honest

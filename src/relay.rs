@@ -122,8 +122,12 @@ pub const RELAY_VERSION: &str = "relay-4";
 const HELLO_MAX_SKEW_SECS: u64 = 120;
 
 /// The replay guard must remember a hello for the whole interval in which its
-/// timestamp is acceptable: twice the skew after first sight (see replay.rs).
-const HELLO_REPLAY_WINDOW: Duration = Duration::from_secs(2 * HELLO_MAX_SKEW_SECS);
+/// timestamp is acceptable. That is twice the skew plus one second, because
+/// the timestamp is compared in whole seconds, plus a second for the time
+/// between reading the clocks and reaching the guard: the gateway's rule,
+/// `ReplayGuard::window_for_skew` (see replay.rs). Until 2026-11-12 this was
+/// twice the skew, one second short.
+const HELLO_REPLAY_WINDOW: Duration = ReplayGuard::window_for_skew(HELLO_MAX_SKEW_SECS);
 
 /// Replay cache capacity. Only signature-valid, in-window hellos from
 /// allow-listed clients are ever inserted, so it cannot be filled by a
@@ -1976,6 +1980,41 @@ mod tests {
             .expect("join")
             .expect_err("the recording must be refused");
         assert!(err.to_string().contains("replayed"), "got: {err}");
+    }
+
+    /// The hello's timestamp is compared with the server's clock in whole
+    /// seconds, so a hello is acceptable for `2 * HELLO_MAX_SKEW_SECS + 1`
+    /// seconds of real time. A guard built with the relay's window must
+    /// still remember, in the last of those seconds, a hello it first saw in
+    /// the first. With a window of `2 * HELLO_MAX_SKEW_SECS` it had forgotten
+    /// it one second early (found 2026-11-11).
+    #[test]
+    fn the_replay_window_covers_the_whole_interval_a_hello_is_acceptable() {
+        let mut guard = ReplayGuard::new(HELLO_REPLAY_WINDOW, 16);
+        let id = [7u8; 32];
+        let first_sight = Instant::now();
+        assert_eq!(guard.check_and_insert(id, first_sight), Verdict::Fresh);
+
+        // First sight while the server's clock read `timestamp - skew`. The
+        // last second in which the timestamp check still passes begins
+        // `2 * skew` seconds later.
+        let last_second = first_sight + Duration::from_secs(2 * HELLO_MAX_SKEW_SECS);
+        assert_eq!(
+            guard.check_and_insert(id, last_second),
+            Verdict::Replay,
+            "forgotten at the start of the last acceptable second"
+        );
+        assert_eq!(
+            guard.check_and_insert(id, last_second + Duration::from_millis(999)),
+            Verdict::Replay,
+            "forgotten before the end of the last acceptable second"
+        );
+
+        // The relay's window is the gateway's rule applied to the relay's skew.
+        assert_eq!(
+            HELLO_REPLAY_WINDOW,
+            ReplayGuard::window_for_skew(HELLO_MAX_SKEW_SECS)
+        );
     }
 
     #[tokio::test]

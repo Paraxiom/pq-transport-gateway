@@ -32,7 +32,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, error, info, warn};
@@ -557,9 +557,10 @@ impl ProxyServer {
         let qkd_client = QkdClient::new(&config)?;
         let authenticator = Authenticator::new(&config)?;
         // The guard must remember a hello for the whole interval in which its
-        // timestamp is acceptable: 2 × skew after first sight (see replay.rs).
-        let replay_guard = Arc::new(Mutex::new(ReplayGuard::new(
-            Duration::from_secs(2 * config.proxy.hello_max_skew_secs),
+        // timestamp is acceptable, which is one second more than 2 × skew:
+        // `for_skew` gives the window (see replay.rs).
+        let replay_guard = Arc::new(Mutex::new(ReplayGuard::for_skew(
+            config.proxy.hello_max_skew_secs,
             config.proxy.hello_replay_cache_entries,
         )));
         Ok(Self {
@@ -936,6 +937,7 @@ fn disable_nagle(stream: &TcpStream, peer: &SocketAddr) {
 mod tests {
     use super::*;
     use crate::crypto::EphemeralKemKey;
+    use std::time::Duration;
 
     async fn loopback_pair() -> (TcpStream, TcpStream) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1082,9 +1084,15 @@ mod tests {
         hello
     }
 
-    /// A small guard with a 240 s window (2 × the 120 s default skew).
+    /// A small guard, built the way the gateway builds its own, for the
+    /// 120 s default skew.
     fn guard(max_entries: usize) -> Mutex<ReplayGuard> {
-        Mutex::new(ReplayGuard::new(Duration::from_secs(240), max_entries))
+        guard_for_skew(120, max_entries)
+    }
+
+    /// A guard built the way the gateway builds its own, for `skew`.
+    fn guard_for_skew(skew: u64, max_entries: usize) -> Mutex<ReplayGuard> {
+        Mutex::new(ReplayGuard::for_skew(skew, max_entries))
     }
 
     /// Client-side v3 transcript reconstruction from wire data — what a real
@@ -1388,6 +1396,39 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("timestamp"), "got: {err}");
+    }
+
+    /// The timestamp is compared in whole seconds, so a hello stamped `t` is
+    /// acceptable while the server's clock reads `t - skew ..= t + skew`: an
+    /// interval of `2 * skew + 1` seconds of real time, not `2 * skew`. A
+    /// hello first seen at the very start of that interval (dated `skew`
+    /// seconds ahead of the server) is still acceptable `2 * skew` seconds
+    /// later, and must still be remembered then.
+    #[test]
+    fn v3_hello_first_seen_at_the_early_edge_is_still_refused_at_the_late_edge() {
+        let client_kem = EphemeralKemKey::new().unwrap();
+        let client_id = PqKeyExchange::new().unwrap();
+        let hello = v3_hello(&client_kem, &client_id);
+        let skew = 120u64;
+        let g = guard_for_skew(skew, 16);
+        let t0 = Instant::now();
+
+        // Server clock reads t - skew: the hello is dated `skew` seconds ahead.
+        admit_hello_v3(&hello, hello.timestamp - skew, skew, &g, t0)
+            .expect("first sight, at the early edge, is admitted");
+
+        // 2 * skew seconds later the server clock reads t + skew, the last
+        // second in which the timestamp check accepts this hello.
+        let later = t0 + Duration::from_secs(2 * skew);
+        let err = admit_hello_v3(&hello, hello.timestamp + skew, skew, &g, later)
+            .expect_err("a second sight inside the acceptance interval must be refused");
+        assert!(err.to_string().contains("replayed"), "got: {err}");
+
+        // And at any later instant of that last second.
+        let later = t0 + Duration::from_secs(2 * skew) + Duration::from_millis(999);
+        let err = admit_hello_v3(&hello, hello.timestamp + skew, skew, &g, later)
+            .expect_err("still inside the acceptance interval");
+        assert!(err.to_string().contains("replayed"), "got: {err}");
     }
 
     #[test]

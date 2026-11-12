@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+### Hello replay guard: the window was one second too short (2026-11-12)
+
+- **The defect.** The gateway admits a v3 hello when its signed timestamp is
+  within `hello_max_skew_secs` of the server clock and the replay guard has
+  not seen it. The guard remembered a hello for `2 × skew` seconds. The
+  timestamp check works in whole seconds, so a timestamp is acceptable
+  during `2 × skew + 1` seconds of real time. A hello first seen when it
+  was dated exactly `skew` seconds ahead of the server was forgotten during
+  the last second in which its timestamp still passed, and a copy presented
+  in that second was admitted again. The relay hello had the same window
+  (`HELLO_REPLAY_WINDOW`) and the same gap.
+- **What it cost.** Gateway: one more QKD key allocation and one more
+  encapsulation per replayed hello. Relay: one more handshake served. At
+  most once per hello, and only for a hello dated at the far edge of the
+  allowed skew. No secret: only the honest client can decapsulate. An
+  attacker has to record such a hello and present it again about
+  `2 × skew` seconds later, inside a window of at most one second.
+- **The fix.** `ReplayGuard::window_for_skew` gives a window of
+  `2 × skew + 2` seconds: one second for the whole-second comparison, one
+  for the time between reading the clocks and reaching the guard. The
+  gateway builds its guard with `ReplayGuard::for_skew`; the relay's
+  `HELLO_REPLAY_WINDOW` is `ReplayGuard::window_for_skew(HELLO_MAX_SKEW_SECS)`.
+  The arithmetic saturates on an absurd skew instead of wrapping to a short
+  window. No configuration change and no wire change.
+- Tests: `v3_hello_first_seen_at_the_early_edge_is_still_refused_at_the_late_edge`
+  (gateway) and
+  `the_replay_window_covers_the_whole_interval_a_hello_is_acceptable`
+  (relay); both fail with the old window.
+  `a_guard_for_a_skew_remembers_through_the_last_acceptable_second`,
+  `the_window_for_a_skew_covers_the_whole_acceptance_interval`.
+- Limits that remain: a restart empties the guard, so a hello admitted in
+  the last window can be admitted once more after a restart; a server wall
+  clock set back during the window makes old timestamps acceptable again.
+
 ### Input checks on the key manager side (2026-11-11)
 
 - **SAE IDs are restricted.** An SAE ID becomes a path segment of the key

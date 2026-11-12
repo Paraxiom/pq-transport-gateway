@@ -43,7 +43,8 @@ pub struct ProxyConfig {
     pub hello_max_skew_secs: u64,
 
     /// v3 hello replay cache capacity, in entries (32 bytes each plus
-    /// bookkeeping). Size to handshake rate × 2 × `hello_max_skew_secs`. Only
+    /// bookkeeping). Size to handshake rate × (2 × `hello_max_skew_secs` + 2)
+    /// seconds, the time the guard remembers a hello. Only
     /// signature-valid, in-window hellos are inserted; when full the guard
     /// fails closed rather than reopening the replay window.
     #[serde(default = "default_hello_replay_cache_entries")]

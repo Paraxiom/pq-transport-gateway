@@ -1,6 +1,6 @@
 # Contributing to PQ Transport Gateway
 
-Thank you for your interest in PQTG. This project addresses a known vulnerability class in ETSI GS QKD 014 (classical TLS on the control channel). Contribution quality and security hygiene matter.
+Thank you for your interest in PQTG. This project addresses a known vulnerability class in ETSI GS QKD 014 (classical TLS on the key delivery interface). Contribution quality and security hygiene matter.
 
 ## Getting started
 
@@ -35,7 +35,7 @@ Commits without a sign-off will be rejected by CI.
 
 ## Security-sensitive changes
 
-Any change touching the control-channel protocol, KEM negotiation, or key-derivation is security-sensitive. Tag the PR with `security-review`. Do not open public issues for suspected vulnerabilities — see [SECURITY.md](SECURITY.md).
+Any change touching the key delivery protocol, KEM negotiation, or key-derivation is security-sensitive. Tag the PR with `security-review`. Do not open public issues for suspected vulnerabilities — see [SECURITY.md](SECURITY.md).
 
 ## Commit messages
 

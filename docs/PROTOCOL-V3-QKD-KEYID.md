@@ -249,7 +249,7 @@ QKD chain step (§4).
   are all inside the Falcon-512-signed transcript (§4). A MITM cannot swap a
   key_id it can fetch, nor force a downgrade, without breaking the signature
   (and step-5 vk-pinning already prevents substituting the signing key).
-- **No QKD bytes on the classical channel** — unchanged from v2's intent.
+- **No QKD key bytes cross the connection between client and gateway**: unchanged from v2's intent.
 - **Replay.** `client_random`/`server_random` already randomize the transcript;
   ETSI keys are single-use (KMS `key-expiration.hard`, used-once TTL ≈ 10 s),
   so a replayed `key_id` resolves to an already-consumed/expired key → abort.

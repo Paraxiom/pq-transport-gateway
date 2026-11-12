@@ -24,7 +24,7 @@ Report privately via one of these channels:
 
 ### Disclosure process
 
-We follow coordinated disclosure. Because PQTG addresses a known class of vulnerability in ETSI GS QKD 014 (classical TLS on the control channel), we coordinate with affected QKD vendors and standards bodies before public disclosure of any additional findings.
+We follow coordinated disclosure. Because PQTG addresses a known class of vulnerability in ETSI GS QKD 014 (classical TLS on the key delivery interface), we coordinate with affected QKD vendors and standards bodies before public disclosure of any additional findings.
 
 1. Reporter submits privately
 2. We acknowledge and investigate
@@ -48,7 +48,7 @@ are affected by the same nonce reuse as 2.0.0.
 
 ### In scope
 
-- Control-channel protocol security (replacing classical TLS in ETSI 014)
+- Security of the key delivery protocol (what replaces classical TLS for ETSI GS QKD 014 key delivery)
 - KEM negotiation logic
 - Authenticated key material delivery
 - Session key derivation
@@ -78,7 +78,7 @@ cryptographic schemes, and do not cover the per-direction session keys of
 
 - Early-stage software despite the 3.x version number: the major version counts wire breaks, not maturity. Use with appropriate caution for production QKD links
 - Not yet externally audited
-- Assumes trusted QKD hardware upstream; PQTG secures the control channel, not the quantum channel itself
+- Assumes trusted QKD hardware upstream; PQTG secures key delivery (the ETSI GS QKD 014 interface). It does not touch the quantum channel, nor the classical channel the two QKD units use between themselves
 
 ## Advisories
 

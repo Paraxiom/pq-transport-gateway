@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.1.0 (not released yet)
+## 3.1.0 (2026-11-13)
 
 3.1.0 closes what was open on the gateway side of 3.0.0 (advisory of
 2026-11-12 in `SECURITY.md`). It speaks the same wire versions as 3.0.0,
